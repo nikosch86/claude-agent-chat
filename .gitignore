@@ -1,0 +1,9 @@
+# built binary (produced by `make build`)
+/agent-chat
+
+# project-local Claude Code state
+/.claude/settings.local.json
+
+# editor / OS noise
+*.swp
+.DS_Store
