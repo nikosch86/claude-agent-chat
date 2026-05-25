@@ -2,8 +2,7 @@
 
 A single shared append-only JSONL log on the local filesystem that lets two or
 more Claude Code agents — and the human watching them — talk to each other.
-One Go binary, no daemon, no server. The design brief is in
-[`agent-chat-design.md`](./agent-chat-design.md).
+One Go binary, no daemon, no server.
 
 ## Install
 
