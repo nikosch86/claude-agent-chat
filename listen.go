@@ -40,6 +40,24 @@ func runListen(args []string) int {
 		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
 		return 2
 	}
+
+	// Singleton guard. At most one live listener per nick may run — a second
+	// would duplicate notifications and race on the cursor. The lock is an
+	// flock(2) the kernel drops the instant this process dies (clean exit,
+	// SIGTERM, or SIGKILL), so a previous listener never wedges the next one
+	// and there is no stale PID file to reap. This is the hard guarantee; the
+	// primer's heartbeat hint is only a soft optimization that keeps us from
+	// usually spawning the doomed second process in the first place. Without
+	// this, a second `agent-chat listen` (e.g. one the agent starts after a
+	// /clear, having forgotten the first is still alive) would simply run.
+	release, ok := tryLockListener(nick)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "listen: a listener for %q is already running; exiting. "+
+			"Expected after /clear or /compact — this is not an error, do not restart it.\n", nick)
+		return 0
+	}
+	defer release()
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	return listenLoop(ctx, nick, os.Stdout)
@@ -124,6 +142,13 @@ func drainListen(cursor int64, me, nick string, out io.Writer) int64 {
 
 func heartbeatPath(nick string) string {
 	return filepath.Join(chatHome(), "agents", nick, "listener-heartbeat")
+}
+
+// listenerLockPath is the per-nick singleton lock file, co-located with the
+// heartbeat. It is only ever flock(2)'d, never written to, and survives normal
+// listener restarts as a stable rendezvous inode.
+func listenerLockPath(nick string) string {
+	return filepath.Join(chatHome(), "agents", nick, "listener.lock")
 }
 
 func touchListenerHeartbeat(nick string) {

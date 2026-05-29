@@ -252,6 +252,79 @@ func TestListenCrossProcess(t *testing.T) {
 	}
 }
 
+// TestListenerLockIsSingleton exercises the lock directly: while one holder is
+// live, a second acquisition for the same nick is denied; a different nick is
+// independent; and the lock is re-acquirable once released.
+func TestListenerLockIsSingleton(t *testing.T) {
+	withTempHome(t)
+
+	release, ok := tryLockListener("alice")
+	if !ok {
+		t.Fatal("first tryLockListener(alice) should acquire the lock")
+	}
+	if _, ok2 := tryLockListener("alice"); ok2 {
+		t.Error("second tryLockListener(alice) must be denied while the first holds it")
+	}
+	if rel, ok3 := tryLockListener("bob"); !ok3 {
+		t.Error("a different nick must get its own independent lock")
+	} else {
+		rel()
+	}
+
+	release()
+	rel, ok4 := tryLockListener("alice")
+	if !ok4 {
+		t.Error("lock must be re-acquirable after the holder releases it")
+	}
+	rel()
+}
+
+// TestListenSecondProcessExitsImmediately is the cross-process proof that a
+// second `agent-chat listen` for a nick already being listened to refuses to
+// run (exit 0, with an explanatory note) instead of becoming a duplicate. This
+// is the guarantee the heartbeat-only primer hint could not make.
+func TestListenSecondProcessExitsImmediately(t *testing.T) {
+	home := withTempHome(t)
+
+	first := exec.Command(builtBinary, "listen", "--as", "alice")
+	first.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+	if err := first.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = first.Process.Kill()
+		_, _ = first.Process.Wait()
+	})
+
+	// The lock is taken before listenLoop touches the heartbeat, so once the
+	// heartbeat exists the first process provably holds the lock. Waiting on it
+	// makes the second launch deterministic rather than racing a fixed sleep.
+	if !waitFor(t, 2*time.Second, func() bool {
+		_, err := os.Stat(heartbeatPath("alice"))
+		return err == nil
+	}) {
+		t.Fatal("first listener never established its heartbeat")
+	}
+
+	// Bound the second run: if the lock were broken it would block forever as a
+	// real listener, so a deadline turns that failure into a clear error rather
+	// than a hung test.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	second := exec.CommandContext(ctx, builtBinary, "listen", "--as", "alice")
+	second.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+	out, err := second.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("second listener did not exit; it must refuse to start when one is live. output: %s", out)
+	}
+	if err != nil {
+		t.Fatalf("second listener should exit 0, got %v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "already running") {
+		t.Errorf("second listener should explain it is already running, got: %q", out)
+	}
+}
+
 func TestSelfHealWarningFiresWhenListenerDeadAndUnread(t *testing.T) {
 	home := withTempHome(t)
 	withFastListen(t)
