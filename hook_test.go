@@ -257,38 +257,15 @@ func TestHookStartInlinesMissedMessages(t *testing.T) {
 	}
 }
 
-func TestHookStartSkipsMonitorInstructionWhenListenerAlive(t *testing.T) {
-	// Models the /clear path: the previous turn's Monitor is still running
-	// (heartbeat is fresh), so a fresh hook-start must NOT instruct Claude to
-	// start a second Monitor — that's what produces the duplicate listener
-	// the user reported.
+func TestHookStartAlwaysInstructsMonitor(t *testing.T) {
+	// Even with a fresh heartbeat (a listener appears to be running), the primer
+	// must still instruct the agent to start the Monitor. A fresh listener
+	// cleanly takes over any existing one — which may be orphaned from a dead
+	// session and silently eating this nick's messages — so starting is always
+	// safe and suppressing it is what made sessions go deaf.
 	_, _ = cleanHookEnv(t)
 	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")
 	touchListenerHeartbeat("alice")
-
-	out, rc := captureStdout(t, func() int { return run([]string{"hook-start"}) })
-	if rc != 0 {
-		t.Fatalf("hook-start rc = %d", rc)
-	}
-	primer := parsePrimer(t, out)
-	if strings.Contains(primer, "REQUIRED FIRST ACTION") {
-		t.Errorf("primer should suppress Monitor instruction when listener is alive:\n%s", primer)
-	}
-	if !strings.Contains(primer, "already running") {
-		t.Errorf("primer should explain the listener is already running:\n%s", primer)
-	}
-}
-
-func TestHookStartInstructsMonitorWhenHeartbeatStale(t *testing.T) {
-	// Stale heartbeat → previous listener is dead → primer must instruct
-	// Claude to (re)start the Monitor.
-	_, _ = cleanHookEnv(t)
-	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")
-	touchListenerHeartbeat("alice")
-	old := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(heartbeatPath("alice"), old, old); err != nil {
-		t.Fatal(err)
-	}
 
 	out, rc := captureStdout(t, func() int { return run([]string{"hook-start"}) })
 	if rc != 0 {
@@ -296,7 +273,7 @@ func TestHookStartInstructsMonitorWhenHeartbeatStale(t *testing.T) {
 	}
 	primer := parsePrimer(t, out)
 	if !strings.Contains(primer, "REQUIRED FIRST ACTION") {
-		t.Errorf("primer should instruct Monitor start when heartbeat is stale:\n%s", primer)
+		t.Errorf("primer must always instruct Monitor start, even with a fresh heartbeat:\n%s", primer)
 	}
 }
 

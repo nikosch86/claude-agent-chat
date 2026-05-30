@@ -41,22 +41,15 @@ func runListen(args []string) int {
 		return 2
 	}
 
-	// Singleton guard. At most one live listener per nick may run — a second
-	// would duplicate notifications and race on the cursor. The lock is an
-	// flock(2) the kernel drops the instant this process dies (clean exit,
-	// SIGTERM, or SIGKILL), so a previous listener never wedges the next one
-	// and there is no stale PID file to reap. This is the hard guarantee; the
-	// primer's heartbeat hint is only a soft optimization that keeps us from
-	// usually spawning the doomed second process in the first place. Without
-	// this, a second `agent-chat listen` (e.g. one the agent starts after a
-	// /clear, having forgotten the first is still alive) would simply run.
-	release, ok := tryLockListener(nick)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "listen: a listener for %q is already running; exiting. "+
-			"Expected after /clear or /compact — this is not an error, do not restart it.\n", nick)
-		return 0
-	}
-	defer release()
+	// Singleton via takeover. At most one live listener per nick may run — a
+	// second would duplicate notifications and race on the cursor. Rather than
+	// refuse to start when the lock is held (which made a fresh Monitor's
+	// listen exit silently and the session go deaf while a listener orphaned
+	// from a dead session kept eating this nick's messages), we evict the
+	// incumbent and take over. The newest listener is the one wired to the
+	// session the user is looking at, so newest-wins is correct; listen always
+	// runs and never goes silent. See tryLockListener for the mechanism.
+	defer tryLockListener(nick)()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

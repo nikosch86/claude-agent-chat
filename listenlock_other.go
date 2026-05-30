@@ -2,10 +2,9 @@
 
 package main
 
-// tryLockListener is a no-op on platforms without flock(2): it always reports
-// the lock as acquired so listen still runs. On such platforms the singleton
-// guarantee falls back to the primer's heartbeat hint alone, as it did before
-// the lock existed.
-func tryLockListener(string) (func(), bool) {
-	return func() {}, true
+// tryLockListener is a no-op on platforms without flock(2): listen always runs.
+// On such platforms there is no singleton guarantee — concurrent listeners may
+// coexist (duplicate notifications), but none is ever silenced.
+func tryLockListener(string) func() {
+	return func() {}
 }

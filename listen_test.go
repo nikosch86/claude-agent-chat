@@ -252,53 +252,46 @@ func TestListenCrossProcess(t *testing.T) {
 	}
 }
 
-// TestListenerLockIsSingleton exercises the lock directly: while one holder is
-// live, a second acquisition for the same nick is denied; a different nick is
-// independent; and the lock is re-acquirable once released.
-func TestListenerLockIsSingleton(t *testing.T) {
+// TestListenerLockAcquireReleaseReacquire exercises the lock helper directly: a
+// free lock acquires, a different nick is independent, and the lock is
+// re-acquirable once released. (Contended takeover is inherently cross-process
+// and is covered by TestListenSecondProcessTakesOver.)
+func TestListenerLockAcquireReleaseReacquire(t *testing.T) {
 	withTempHome(t)
 
-	release, ok := tryLockListener("alice")
-	if !ok {
-		t.Fatal("first tryLockListener(alice) should acquire the lock")
-	}
-	if _, ok2 := tryLockListener("alice"); ok2 {
-		t.Error("second tryLockListener(alice) must be denied while the first holds it")
-	}
-	if rel, ok3 := tryLockListener("bob"); !ok3 {
-		t.Error("a different nick must get its own independent lock")
-	} else {
-		rel()
-	}
-
+	release := tryLockListener("alice")
+	relBob := tryLockListener("bob") // a different nick must lock independently
+	relBob()
 	release()
-	rel, ok4 := tryLockListener("alice")
-	if !ok4 {
-		t.Error("lock must be re-acquirable after the holder releases it")
-	}
-	rel()
+
+	again := tryLockListener("alice") // re-acquirable after release
+	again()
 }
 
-// TestListenSecondProcessExitsImmediately is the cross-process proof that a
-// second `agent-chat listen` for a nick already being listened to refuses to
-// run (exit 0, with an explanatory note) instead of becoming a duplicate. This
-// is the guarantee the heartbeat-only primer hint could not make.
-func TestListenSecondProcessExitsImmediately(t *testing.T) {
+// TestListenSecondProcessTakesOver is the cross-process proof that a second
+// `agent-chat listen` for a nick already being listened to TAKES OVER rather
+// than exiting mute: the incumbent steps down and the newcomer becomes the live
+// listener that delivers subsequent messages. This is the regression guard for
+// the deaf-session bug the refuse-to-start design caused.
+func TestListenSecondProcessTakesOver(t *testing.T) {
 	home := withTempHome(t)
 
-	first := exec.Command(builtBinary, "listen", "--as", "alice")
-	first.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+	start := func() *exec.Cmd {
+		c := exec.Command(builtBinary, "listen", "--as", "alice")
+		c.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+		return c
+	}
+
+	first := start()
 	if err := first.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = first.Process.Kill()
-		_, _ = first.Process.Wait()
-	})
+	firstExited := make(chan error, 1)
+	go func() { firstExited <- first.Wait() }()
+	t.Cleanup(func() { _ = first.Process.Kill() })
 
 	// The lock is taken before listenLoop touches the heartbeat, so once the
-	// heartbeat exists the first process provably holds the lock. Waiting on it
-	// makes the second launch deterministic rather than racing a fixed sleep.
+	// heartbeat exists the first process provably holds the lock.
 	if !waitFor(t, 2*time.Second, func() bool {
 		_, err := os.Stat(heartbeatPath("alice"))
 		return err == nil
@@ -306,22 +299,50 @@ func TestListenSecondProcessExitsImmediately(t *testing.T) {
 		t.Fatal("first listener never established its heartbeat")
 	}
 
-	// Bound the second run: if the lock were broken it would block forever as a
-	// real listener, so a deadline turns that failure into a clear error rather
-	// than a hung test.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	second := exec.CommandContext(ctx, builtBinary, "listen", "--as", "alice")
-	second.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
-	out, err := second.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		t.Fatalf("second listener did not exit; it must refuse to start when one is live. output: %s", out)
-	}
+	// Second listener for the same nick must NOT exit immediately — it takes
+	// over, which makes the incumbent step down (clean SIGTERM exit).
+	second := start()
+	stdout, err := second.StdoutPipe()
 	if err != nil {
-		t.Fatalf("second listener should exit 0, got %v: %s", err, out)
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "already running") {
-		t.Errorf("second listener should explain it is already running, got: %q", out)
+	if err := second.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = second.Process.Kill()
+		_, _ = second.Process.Wait()
+	})
+
+	select {
+	case err := <-firstExited:
+		if ee, ok := err.(*exec.ExitError); ok && !ee.Success() {
+			t.Errorf("incumbent should exit cleanly when taken over, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("incumbent did not step down when a new listener took over")
+	}
+
+	// A message sent after takeover must reach the NEW listener.
+	sendCmd := exec.Command(builtBinary, "send", "--as", "bob", "@alice", "after takeover")
+	sendCmd.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+	if out, err := sendCmd.CombinedOutput(); err != nil {
+		t.Fatalf("send: %v: %s", err, out)
+	}
+
+	ch := make(chan string, 1)
+	go func() {
+		br := bufio.NewReader(stdout)
+		line, _ := br.ReadString('\n')
+		ch <- line
+	}()
+	select {
+	case line := <-ch:
+		if !strings.Contains(line, "after takeover") {
+			t.Errorf("new listener stdout = %q, want the post-takeover message", line)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("new listener did not deliver after taking over")
 	}
 }
 

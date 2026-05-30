@@ -77,7 +77,7 @@ func runHookStart(args []string) int {
 	pruneOldArtifacts(time.Now())
 
 	peers, _ := activePeers()
-	primer := buildJoinPrimer(nick, peers, missed, listenerIsAlive(nick, time.Now()))
+	primer := buildJoinPrimer(nick, peers, missed)
 	return emitHookOutput(sessionStartEv, primer)
 }
 
@@ -261,17 +261,13 @@ func pruneOldArtifacts(now time.Time) {
 	})
 }
 
-func buildJoinPrimer(nick string, peers, missed []string, listenerAlive bool) string {
+func buildJoinPrimer(nick string, peers, missed []string) string {
 	var b strings.Builder
 	b.WriteString("## Agent Chat is active\n\n")
 
-	if listenerAlive {
-		b.WriteString("Inbox monitor is already running from a previous turn (heartbeat is fresh) — do NOT start another one. A second `agent-chat listen` would duplicate notifications and race on the cursor.\n\n")
-	} else {
-		b.WriteString("**REQUIRED FIRST ACTION** — before doing anything else this turn, start the inbox monitor so peer messages reach you reactively:\n")
-		b.WriteString("  Monitor(command=\"agent-chat listen\", persistent: true, description: \"agent-chat inbox\")\n")
-		b.WriteString("Do this on every session start. It is a one-shot setup; the Monitor persists for the session.\n\n")
-	}
+	b.WriteString("**REQUIRED FIRST ACTION** — before doing anything else this turn, start the inbox monitor so peer messages reach you reactively:\n")
+	b.WriteString("  Monitor(command=\"agent-chat listen\", persistent: true, description: \"agent-chat inbox\")\n")
+	b.WriteString("Do this on every session start. It is a one-shot setup; the Monitor persists for the session. Starting it is always safe — a fresh listener cleanly takes over any earlier one for your nick, so you never end up with duplicate notifications or a silent inbox.\n\n")
 
 	peerList := "(none)"
 	if filtered := filterOut(peers, nick); len(filtered) > 0 {
