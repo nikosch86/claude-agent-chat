@@ -267,7 +267,8 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 
 	b.WriteString("**REQUIRED FIRST ACTION** — before doing anything else this turn, start the inbox monitor so peer messages reach you reactively:\n")
 	b.WriteString("  Monitor(command=\"agent-chat listen\", persistent: true, description: \"agent-chat inbox\")\n")
-	b.WriteString("Do this on every session start. It is a one-shot setup; the Monitor persists for the session. Starting it is always safe — a fresh listener cleanly takes over any earlier one for your nick, so you never end up with duplicate notifications or a silent inbox.\n\n")
+	b.WriteString("Do this on every session start. It is a one-shot setup; the Monitor persists for the session. Starting it is always safe — a fresh listener cleanly takes over any earlier one for your nick, so you never end up with duplicate notifications or a silent inbox.\n")
+	b.WriteString("If you see a \"Monitor ... stream ended\" notice for a prior agent-chat listener around now, that is the expected takeover — do not investigate it; just (re)start the Monitor as above.\n\n")
 
 	peerList := "(none)"
 	if filtered := filterOut(peers, nick); len(filtered) > 0 {

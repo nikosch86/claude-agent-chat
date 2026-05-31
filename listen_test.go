@@ -346,6 +346,37 @@ func TestListenSecondProcessTakesOver(t *testing.T) {
 	}
 }
 
+// TestListenEmitsFarewellOnShutdown proves listen leaves a self-describing
+// final line when it exits on signal/cancel. That line is what stops a fresh
+// post-/clear agent from treating the harness's "stream ended" notice as an
+// anomaly worth investigating: it explains the takeover is expected.
+func TestListenEmitsFarewellOnShutdown(t *testing.T) {
+	withTempHome(t)
+	withFastListen(t)
+	var buf syncBuf
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() { done <- listenLoop(ctx, "alice", &buf) }()
+
+	// Let the loop reach its select before cancelling.
+	if !waitFor(t, time.Second, func() bool { return listenerIsAlive("alice", time.Now()) }) {
+		t.Fatal("listener never started")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listen loop did not exit after cancel")
+	}
+
+	if !strings.Contains(buf.String(), "inbox listener stopped") {
+		t.Errorf("shutdown did not emit the farewell line: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "needs no investigation") {
+		t.Errorf("farewell should tell the agent not to investigate: %q", buf.String())
+	}
+}
+
 func TestSelfHealWarningFiresWhenListenerDeadAndUnread(t *testing.T) {
 	home := withTempHome(t)
 	withFastListen(t)

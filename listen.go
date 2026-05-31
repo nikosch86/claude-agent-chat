@@ -28,6 +28,15 @@ var (
 	listenerStaleThreshold = 5 * time.Second
 )
 
+// listenFarewell is the last line listen emits when it exits on a signal
+// (SIGTERM/SIGINT). It is the in-context explanation for the "Monitor stream
+// ended" notice the harness shows when our process exits — most often because a
+// newer session took the listener over (the expected churn after /clear). The
+// previous agent, seeing only a bare "stream ended", wasted a turn hunting for a
+// nonexistent state file before restarting; this line tells it the exit is
+// normal, needs no investigation, and exactly what (not) to do next.
+const listenFarewell = `[agent-chat] inbox listener stopped: superseded by a newer listener or the session ended (expected after /clear or reconnect). This is not an error and needs no investigation — there is no state file to inspect. If this session is still active and has no other agent-chat inbox Monitor, start one with Monitor(command="agent-chat listen", persistent: true); otherwise ignore this.`
+
 func runListen(args []string) int {
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -77,6 +86,7 @@ func listenLoop(ctx context.Context, nick string, out io.Writer) int {
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Fprintln(out, listenFarewell)
 			return 0
 		case <-hbTicker.C:
 			touchListenerHeartbeat(nick)
