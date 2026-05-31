@@ -190,6 +190,37 @@ func TestSendRejectsEmptyText(t *testing.T) {
 	}
 }
 
+func TestSendWarnsOnLargeText(t *testing.T) {
+	home := withTempHome(t)
+	big := strings.Repeat("x", sendTextWarnBytes+1)
+	cmd := exec.Command(builtBinary, "send", "--as", "alice", "@bob", big)
+	cmd.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("send failed: %v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "can be clipped") || !strings.Contains(string(out), "share") {
+		t.Errorf("large send should warn and point at share, got: %s", out)
+	}
+	// The message is still delivered — the warning is advisory, not a block.
+	if lines := readLines(t, filepath.Join(home, "log.jsonl")); len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+}
+
+func TestSendNoWarnOnSmallText(t *testing.T) {
+	home := withTempHome(t)
+	cmd := exec.Command(builtBinary, "send", "--as", "alice", "@bob", "a short reply")
+	cmd.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("send failed: %v: %s", err, out)
+	}
+	if strings.Contains(string(out), "can be clipped") {
+		t.Errorf("small send should not warn, got: %s", out)
+	}
+}
+
 // TestConcurrentSendsAtomic spawns N real processes that each append one line,
 // then verifies every line is intact JSON with the expected fields. This is
 // the actual interleaving check the acceptance criterion calls for.

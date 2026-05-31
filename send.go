@@ -7,6 +7,13 @@ import (
 	"strings"
 )
 
+// sendTextWarnBytes is the size past which send advises using share instead.
+// A send becomes one JSONL line; when that line streams over listen -> Monitor,
+// the harness can clip the notification, so the recipient acts on a truncated
+// message. share keeps the wire tiny (just an artifact path) and the recipient
+// reads the full content with its file tools, which page rather than truncate.
+const sendTextWarnBytes = 2000
+
 func runSend(args []string) int {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -43,6 +50,9 @@ func runSend(args []string) int {
 			fmt.Fprintf(os.Stderr, "send: %v\n", err)
 			return 1
 		}
+	}
+	if len(text) > sendTextWarnBytes {
+		fmt.Fprintf(os.Stderr, "send: text is %d bytes — messages this large can be clipped on the listen/Monitor delivery path. For long content prefer `agent-chat share %s --file PATH`, which travels as an artifact the recipient reads with its file tools.\n", len(text), recipients[0])
 	}
 	maybeWarnListener(os.Stderr, nick)
 	return 0

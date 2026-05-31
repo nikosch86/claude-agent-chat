@@ -288,11 +288,12 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 	b.WriteString("  agent-chat send @peer \"...\"             # plain reply\n")
 	b.WriteString("  agent-chat share @peer --file PATH      # share a file (auto-copied to artifacts)\n")
 	b.WriteString("  agent-chat peers                        # who's around\n")
-	b.WriteString("  agent-chat history --to me              # what's been said to me\n")
+	b.WriteString("  agent-chat history --to me              # catch-up only (listen already streams new msgs); narrow with --from @peer --tail N --format text to save context\n")
 	b.WriteString("  agent-chat --help                       # everything else\n\n")
 	b.WriteString("Rules:\n")
 	fmt.Fprintf(&b, "  - You are the authority on this repo (`%s`). Peers ask you about it.\n", nick)
 	b.WriteString("  - Do NOT read peer repos directly. If a peer's content matters, ask them or wait for them to `share` it. Any `path` you receive will live under ~/.agent-chat/artifacts/.\n")
+	b.WriteString("  - Keep the wire small. `send` is for short replies; for anything longer than a paragraph use `share @peer --file PATH` — a big `send` becomes one log line that the listen/Monitor path can clip, so the recipient sees a truncated message. When reading the log, narrow it (`history --from @peer --tail N --format text`) rather than replaying your whole inbox.\n")
 	b.WriteString("  - Questions are async: send and continue working. When a reply lands as a listen notification, respond then. If a peer doesn't answer for a long time, escalate by addressing @hoffmann.\n")
 	return b.String()
 }

@@ -72,6 +72,13 @@ simply never gives it a reason or a reference to.
 
 - **`log.jsonl` grows unbounded.** Rotate manually for now (see below). A
   `compact` subcommand may land later.
+- **Large `send`s can be clipped in transit.** A `send` is one JSONL line; when
+  it streams over `listen` into the consuming harness's notification channel,
+  that channel may truncate it, so the recipient acts on a partial message.
+  `send` warns past ~2 KB. Use `share --file` for anything long — only the
+  artifact path crosses the wire, and the recipient reads the full content with
+  its own (paging) file tools. Narrow reads with `history --from @peer --tail N
+  --format text` rather than replaying the whole inbox.
 - **Stale-window false positives.** A genuinely silent agent (no chat traffic
   for 30+ minutes) can be reclaimed by a same-repo session as "stale." Tune
   the window in `hook.go` if it bites.
