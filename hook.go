@@ -288,7 +288,16 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 		shown := missed
 		if len(missed) > missedPreviewMax {
 			shown = missed[len(missed)-missedPreviewMax:]
-			fmt.Fprintf(&b, " — latest %d below; run `agent-chat history --to me --tail %d` for the rest", missedPreviewMax, len(missed))
+			// Anchor recovery on the oldest missed line's time, not --tail N:
+			// the agent has just started a listener, so new matching traffic
+			// can land before it runs this — and that would push the oldest
+			// (un-inlined) mentions out of a tail-N view, silently losing the
+			// very messages this points at. --since is exact and complete.
+			if anchor := missedSinceAnchor(missed[0]); anchor != "" {
+				fmt.Fprintf(&b, " — latest %d below; run `agent-chat history --to me --since %s` for the rest", missedPreviewMax, anchor)
+			} else {
+				fmt.Fprintf(&b, " — latest %d below; run `agent-chat history --to me --tail %d` for the rest", missedPreviewMax, len(missed))
+			}
 		}
 		b.WriteString(":\n")
 		for _, line := range shown {
@@ -309,6 +318,19 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 	b.WriteString("  - Keep the wire small. `send` is for short replies; for anything longer than a paragraph use `share @peer --file PATH` — a big `send` becomes one log line that the listen/Monitor path can clip, so the recipient sees a truncated message. When reading the log, narrow it (`history --from @peer --tail N --format text`) rather than replaying your whole inbox.\n")
 	b.WriteString("  - Questions are async: send and continue working. When a reply lands as a listen notification, respond then. If a peer doesn't answer for a long time, escalate by addressing @hoffmann.\n")
 	return b.String()
+}
+
+// missedSinceAnchor returns an RFC3339 timestamp one second before the oldest
+// missed line, for use as `history --since`. The one-second slack keeps the
+// `>=` comparison in history inclusive despite sub-second rounding. Returns ""
+// if the line can't be parsed (it always can — readMissedSince only keeps lines
+// that already unmarshalled — but the caller falls back to --tail if not).
+func missedSinceAnchor(oldest string) string {
+	var r Record
+	if err := json.Unmarshal([]byte(oldest), &r); err != nil {
+		return ""
+	}
+	return time.UnixMilli(int64(float64(r.Ts)*1000)).Add(-time.Second).Format(time.RFC3339)
 }
 
 func filterOut(ss []string, drop string) []string {

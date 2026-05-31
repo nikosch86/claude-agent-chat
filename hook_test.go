@@ -47,6 +47,23 @@ func parsePrimer(t *testing.T, out string) string {
 	return env.HookSpecificOutput.AdditionalContext
 }
 
+// lineContaining returns the single primer line containing sub, failing if
+// there isn't exactly one. Lets a test assert on one line without matching
+// substrings elsewhere in the primer.
+func lineContaining(t *testing.T, text, sub string) string {
+	t.Helper()
+	var hits []string
+	for _, ln := range strings.Split(text, "\n") {
+		if strings.Contains(ln, sub) {
+			hits = append(hits, ln)
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("want exactly one line containing %q, got %d:\n%s", sub, len(hits), text)
+	}
+	return hits[0]
+}
+
 // initGitRepo makes `dir` a git repo and returns the resolved (symlink-evaled)
 // path that resolveNick / hook-start will see.
 func initGitRepo(t *testing.T, dir string) string {
@@ -284,8 +301,16 @@ func TestHookStartTruncatesManyMissed(t *testing.T) {
 	if !strings.Contains(primer, "missed 5 mention") {
 		t.Errorf("expected full missed count of 5, primer:\n%s", primer)
 	}
-	if !strings.Contains(primer, "--tail 5") || !strings.Contains(primer, "for the rest") {
-		t.Errorf("expected a history hint to pull the rest, primer:\n%s", primer)
+	// The recovery hint must anchor on time (--since), not --tail N: tail would
+	// drop the oldest missed mentions if new traffic arrives before the agent
+	// runs it. See missedSinceAnchor. Scope the check to the hint line — the
+	// static guidance elsewhere in the primer legitimately mentions --tail.
+	hint := lineContaining(t, primer, "for the rest")
+	if !strings.Contains(hint, "--since ") {
+		t.Errorf("recovery hint should anchor on --since, got: %q", hint)
+	}
+	if strings.Contains(hint, "--tail") {
+		t.Errorf("recovery hint should not use the lossy --tail form, got: %q", hint)
 	}
 	// Only the latest missedPreviewMax (3) are inlined.
 	for _, want := range []string{`"m3"`, `"m4"`, `"m5"`} {
