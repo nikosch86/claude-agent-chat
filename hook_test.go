@@ -257,6 +257,49 @@ func TestHookStartInlinesMissedMessages(t *testing.T) {
 	}
 }
 
+func TestHookStartTruncatesManyMissed(t *testing.T) {
+	home, _ := cleanHookEnv(t)
+	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")
+
+	// Five mentions to @alice, all behind a cursor at 0, so the join replays
+	// them — more than missedPreviewMax, which must trigger truncation.
+	writeLog(t, home,
+		`{"ts":1001.000,"from":"bob","to":"@alice","text":"m1"}`,
+		`{"ts":1002.000,"from":"bob","to":"@alice","text":"m2"}`,
+		`{"ts":1003.000,"from":"bob","to":"@alice","text":"m3"}`,
+		`{"ts":1004.000,"from":"bob","to":"@alice","text":"m4"}`,
+		`{"ts":1005.000,"from":"bob","to":"@alice","text":"m5"}`,
+	)
+	if err := writeCursor("alice", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	out, rc := captureStdout(t, func() int { return run([]string{"hook-start"}) })
+	if rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	primer := parsePrimer(t, out)
+
+	// Full count is still reported, and the agent is told how to get the rest.
+	if !strings.Contains(primer, "missed 5 mention") {
+		t.Errorf("expected full missed count of 5, primer:\n%s", primer)
+	}
+	if !strings.Contains(primer, "--tail 5") || !strings.Contains(primer, "for the rest") {
+		t.Errorf("expected a history hint to pull the rest, primer:\n%s", primer)
+	}
+	// Only the latest missedPreviewMax (3) are inlined.
+	for _, want := range []string{`"m3"`, `"m4"`, `"m5"`} {
+		if !strings.Contains(primer, want) {
+			t.Errorf("expected latest mention %s inlined, primer:\n%s", want, primer)
+		}
+	}
+	for _, dropped := range []string{`"m1"`, `"m2"`} {
+		if strings.Contains(primer, dropped) {
+			t.Errorf("old mention %s should not be inlined, primer:\n%s", dropped, primer)
+		}
+	}
+}
+
 func TestHookStartAlwaysInstructsMonitor(t *testing.T) {
 	// Even with a fresh heartbeat (a listener appears to be running), the primer
 	// must still instruct the agent to start the Monitor. A fresh listener

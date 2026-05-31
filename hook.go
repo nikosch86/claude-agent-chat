@@ -17,6 +17,13 @@ const (
 	artifactsTTL   = 14 * 24 * time.Hour
 	hookOutKey     = "hookSpecificOutput"
 	sessionStartEv = "SessionStart"
+
+	// missedPreviewMax caps how many missed mentions the join primer inlines.
+	// The primer is force-fed into context on every session start, so a long
+	// absence would otherwise dump an unbounded backlog of tokens the agent
+	// never chose to pay for. Past this many, show only the latest few and
+	// point the agent at `history` to pull the rest on demand.
+	missedPreviewMax = 3
 )
 
 func runHookStart(args []string) int {
@@ -277,8 +284,14 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 	fmt.Fprintf(&b, "You are joined as `%s`. Active peers: %s.\n\n", nick, peerList)
 
 	if len(missed) > 0 {
-		fmt.Fprintf(&b, "You missed %d mention(s) while offline:\n", len(missed))
-		for _, line := range missed {
+		fmt.Fprintf(&b, "You missed %d mention(s) while offline", len(missed))
+		shown := missed
+		if len(missed) > missedPreviewMax {
+			shown = missed[len(missed)-missedPreviewMax:]
+			fmt.Fprintf(&b, " — latest %d below; run `agent-chat history --to me --tail %d` for the rest", missedPreviewMax, len(missed))
+		}
+		b.WriteString(":\n")
+		for _, line := range shown {
 			fmt.Fprintf(&b, "  %s\n", line)
 		}
 		b.WriteByte('\n')
