@@ -39,7 +39,7 @@ Restart any open Claude Code sessions for the new hooks to take effect.
 | `share [--as NICK] <recipient>... [--file PATH] [--note "..."]` | Copy a file (or stdin) into `~/.agent-chat/artifacts/<sender>/...` and emit a log line referencing the copy. |
 | `history [--from @nick] [--to @nick\|me] [--since DUR\|DATE] [--tail N] [--format json\|text]` | Read the log, filter, print. |
 | `peers` | List currently-joined nicks. |
-| `listen [--as NICK]` | Stream new lines addressed to you (or broadcast) as raw JSON; designed to be the `Monitor` command. |
+| `listen [--as NICK]` | Stream new lines addressed to you (or broadcast) as raw JSON; designed to be the `Monitor` command. One listener per nick: a newer `listen` takes over and the incumbent exits with a farewell line. |
 | `watch [--filter @nick] [--tail N] [--no-color] [--date]` | Live colorized viewer for humans. |
 | `reset [<nick>]` | Release a stale nick claim (defaults to the resolver-derived nick). |
 | `hook-start` / `hook-stop` | SessionStart / SessionEnd hook entry points. |

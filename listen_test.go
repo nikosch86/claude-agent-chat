@@ -219,9 +219,15 @@ func TestListenCrossProcess(t *testing.T) {
 		_, _ = cmd.Process.Wait()
 	})
 
-	// Brief settle so listen establishes its cursor at current EOF before
-	// our send appends; otherwise we'd be racing the very first scan.
-	time.Sleep(50 * time.Millisecond)
+	// Wait until listen has seeded its cursor at the current EOF before the
+	// send appends, or the message would be skipped as pre-join history. The
+	// heartbeat is touched right after seeding, so it signals readiness.
+	if !waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(heartbeatPath("alice"))
+		return err == nil
+	}) {
+		t.Fatal("listener never established its heartbeat")
+	}
 
 	sendCmd := exec.Command(builtBinary, "send", "--as", "bob", "@alice", "hi cross-process")
 	sendCmd.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
@@ -266,6 +272,52 @@ func TestListenerLockAcquireReleaseReacquire(t *testing.T) {
 
 	again := tryLockListener("alice") // re-acquirable after release
 	again()
+}
+
+// TestIsOwnListenerIdentifiesLiveProcess proves the pid-verification step of
+// takeover recognises a live `agent-chat listen` process on this platform and
+// rejects a process that is not a listener.
+func TestIsOwnListenerIdentifiesLiveProcess(t *testing.T) {
+	home := withTempHome(t)
+
+	cmd := exec.Command(builtBinary, "listen", "--as", "alice")
+	cmd.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	// The child may not be fully exec'd right after Start (macOS stalls a
+	// fresh binary's first exec on code-signing validation), so poll.
+	if !waitFor(t, 2*time.Second, func() bool { return isOwnListener(cmd.Process.Pid) }) {
+		t.Errorf("isOwnListener(%d) = false for a live agent-chat listen process", cmd.Process.Pid)
+	}
+	if isOwnListener(os.Getpid()) {
+		t.Errorf("isOwnListener(%d) = true for the test process itself", os.Getpid())
+	}
+}
+
+// TestIsListenArgv pins the argv heuristic shared by the /proc and ps paths.
+func TestIsListenArgv(t *testing.T) {
+	cases := []struct {
+		argv []string
+		want bool
+	}{
+		{[]string{"/Users/x/.claude/agent-chat/agent-chat", "listen"}, true},
+		{[]string{"agent-chat", "listen", "--as", "alice"}, true},
+		{[]string{"agent-chat", "send", "@bob", "listen up"}, false}, // "listen" must be a bare arg, not message text
+		{[]string{"vim", "listen"}, false},                           // no binary match
+		{[]string{"agent-chat", "watch"}, false},                     // wrong verb
+		{nil, false},
+	}
+	for _, c := range cases {
+		if got := isListenArgv(c.argv); got != c.want {
+			t.Errorf("isListenArgv(%q) = %v, want %v", c.argv, got, c.want)
+		}
+	}
 }
 
 // TestListenSecondProcessTakesOver is the cross-process proof that a second

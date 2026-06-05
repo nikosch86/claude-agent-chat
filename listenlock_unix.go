@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -99,19 +100,29 @@ func requestIncumbentStepDown(pid int) {
 	_ = syscall.Kill(pid, syscall.SIGTERM)
 }
 
-// isOwnListener reports whether pid looks like one of our own `agent-chat
-// listen` processes. It reads /proc/<pid>/cmdline (Linux); where that is
-// unavailable (other unixes) it returns false, so takeover there safely
-// degrades to running as a duplicate rather than signalling an unverified pid.
+// isOwnListener reports whether pid is one of our own `agent-chat listen`
+// processes, read from /proc/<pid>/cmdline where available (Linux), else from
+// `ps -o command=` (macOS and other no-/proc unixes). Unreadable means false.
 func isOwnListener(pid int) bool {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
+		// argv is NUL-separated.
+		return isListenArgv(strings.Split(string(b), "\x00"))
+	}
+	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
+		// ps exits non-zero when the pid no longer exists.
 		return false
 	}
-	// argv is NUL-separated; expect argv[0] to name the binary and a bare
-	// "listen" verb somewhere after it.
+	// ps space-joins argv into one line, so fields of a spaced argument
+	// match as individual tokens here.
+	return isListenArgv(strings.Fields(string(out)))
+}
+
+// isListenArgv applies the listener heuristic to an argv: some argument names
+// the binary and a bare "listen" verb appears alongside it.
+func isListenArgv(argv []string) bool {
 	var sawBinary, sawListen bool
-	for _, a := range strings.Split(string(b), "\x00") {
+	for _, a := range argv {
 		if strings.Contains(a, "agent-chat") {
 			sawBinary = true
 		}

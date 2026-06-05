@@ -148,8 +148,8 @@ func heartbeatPath(nick string) string {
 }
 
 // listenerLockPath is the per-nick singleton lock file, co-located with the
-// heartbeat. It is only ever flock(2)'d, never written to, and survives normal
-// listener restarts as a stable rendezvous inode.
+// heartbeat. The flock(2) is the lock; the holder also stamps its pid into
+// the file (see recordLockHolder) so a taking-over listener can signal it.
 func listenerLockPath(nick string) string {
 	return filepath.Join(chatHome(), "agents", nick, "listener.lock")
 }
