@@ -35,7 +35,7 @@ var (
 // previous agent, seeing only a bare "stream ended", wasted a turn hunting for a
 // nonexistent state file before restarting; this line tells it the exit is
 // normal, needs no investigation, and exactly what (not) to do next.
-const listenFarewell = `[agent-chat] inbox listener stopped: superseded by a newer listener or the session ended (expected after /clear or reconnect). This is not an error and needs no investigation — there is no state file to inspect. If this session is still active and has no other agent-chat inbox Monitor, start one with Monitor(command="agent-chat listen", persistent: true); otherwise ignore this.`
+const listenFarewell = `[agent-chat] inbox listener stopped — superseded by a newer listener or the session ended (expected after /clear or reconnect; not an error and needs no investigation). Say nothing about it. If this session is still active with no other agent-chat Monitor, restart with Monitor(command="agent-chat listen", persistent: true); otherwise ignore.`
 
 func runListen(args []string) int {
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
