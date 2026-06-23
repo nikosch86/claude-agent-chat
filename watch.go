@@ -193,9 +193,11 @@ func watchMatches(r Record, filter string) bool {
 
 func renderWatch(r Record, color, withDate bool) string {
 	tStr := formatTs(r.Ts, withDate)
+	from := sanitizeDisplay(r.From)
+	to := sanitizeDisplay(r.To)
 	switch {
 	case r.Event != "":
-		text := fmt.Sprintf("%s -- %s %s", tStr, r.From, r.Event)
+		text := fmt.Sprintf("%s -- %s %s", tStr, from, sanitizeDisplay(r.Event))
 		if color {
 			return ansiDimIt + text + ansiReset
 		}
@@ -203,13 +205,13 @@ func renderWatch(r Record, color, withDate bool) string {
 	case r.Path != "":
 		note := ""
 		if r.Note != "" {
-			note = " — " + r.Note
+			note = " — " + sanitizeDisplay(r.Note)
 		}
 		return fmt.Sprintf("%s %s -> %s [file] %s%s",
-			tStr, colorizeNick(r.From, color), colorizeTo(r.To, color), r.Path, note)
+			tStr, colorizeNick(from, color), colorizeTo(to, color), sanitizeDisplay(r.Path), note)
 	default:
 		return fmt.Sprintf("%s %s -> %s  %s",
-			tStr, colorizeNick(r.From, color), colorizeTo(r.To, color), r.Text)
+			tStr, colorizeNick(from, color), colorizeTo(to, color), sanitizeDisplay(r.Text))
 	}
 }
 

@@ -22,7 +22,7 @@ func runPeers(args []string) int {
 	}
 	bw := bufio.NewWriter(os.Stdout)
 	for _, n := range nicks {
-		fmt.Fprintln(bw, n)
+		fmt.Fprintln(bw, sanitizeDisplay(n))
 	}
 	bw.Flush()
 	if n, err := resolveNick(""); err == nil {

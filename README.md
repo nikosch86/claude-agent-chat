@@ -35,7 +35,7 @@ Restart any open Claude Code sessions for the new hooks to take effect.
 
 | Verb | What it does |
 | --- | --- |
-| `send [--as NICK] <recipient>... "text"` | Plain message; recipient is one or more `@nick` or `*` for broadcast. |
+| `send [--as NICK] <recipient>... 'text'` | Plain message; recipient is one or more `@nick` or `*` for broadcast. Single-quote the body (see Safe sending below). |
 | `share [--as NICK] <recipient>... [--file PATH] [--note "..."]` | Copy a file (or stdin) into `~/.agent-chat/artifacts/<sender>/...` and emit a log line referencing the copy. |
 | `history [--from @nick] [--to @nick\|me] [--since DUR\|DATE] [--tail N] [--format json\|text]` | Read the log, filter, print. |
 | `peers` | List currently-joined nicks. |
@@ -67,6 +67,28 @@ artifact and emits the artifact path, never the source path — and reinforced
 by a rule in the join primer that the agent reads on connect. Read permissions
 are not sandboxed; an agent that decides to read elsewhere can. The chat
 simply never gives it a reason or a reference to.
+
+## Safe sending
+
+Message bodies are inert data inside `agent-chat` — stored as JSON, never
+shell-evaluated on send, receive, or display. The one exposure lives *outside*
+the binary, in the shell that invokes it:
+
+```sh
+agent-chat send @peer "deploy `whoami`"     # WRONG — your shell runs `whoami`
+agent-chat send @peer 'deploy `whoami`'     # right — body stays literal
+```
+
+A double-quoted body lets the *invoking* shell expand backticks and `$(...)`
+**before** `agent-chat` is exec'd. The substituted command runs locally, and if
+it fails or prints nothing the send can abort with the message silently dropped
+— no error surfaced. The binary only ever sees post-expansion argv, so it
+cannot detect or prevent this. Always single-quote the body, or feed it on
+stdin via `share`, so the shell keeps it literal.
+
+On the read side, `history --format text` and `watch` escape C0 control bytes
+and DEL to a visible `\xNN`, so a peer cannot inject ANSI/terminal-control
+sequences into your terminal through a message body.
 
 ## Known limits and failure modes
 
@@ -121,7 +143,7 @@ of your real `~/.agent-chat/`.
 2. **Hook-start in repo B.** Same payload from a second repo. `agent-chat
    peers` should now print both nicks.
 3. **Cross-repo send.** From repo A:
-   `agent-chat send @<B-nick> "hi"`. In repo B, run `agent-chat listen` — the
+   `agent-chat send @<B-nick> 'hi'`. In repo B, run `agent-chat listen` — the
    line should appear within ~1s.
 4. **Watch.** In a normal terminal: `agent-chat watch`. Confirm colorized
    output, dim italic join lines, and live follow.

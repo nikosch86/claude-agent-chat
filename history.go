@@ -140,17 +140,19 @@ func writeHistory(in io.Reader, out io.Writer, format, fromNick, wantTo string, 
 
 func renderText(r Record) string {
 	t := time.UnixMilli(int64(float64(r.Ts) * 1000)).Format("15:04:05")
+	from := sanitizeDisplay(r.From)
+	to := sanitizeDisplay(r.To)
 	switch {
 	case r.Event != "":
-		return fmt.Sprintf("%s -- %s %s", t, r.From, r.Event)
+		return fmt.Sprintf("%s -- %s %s", t, from, sanitizeDisplay(r.Event))
 	case r.Path != "":
 		note := ""
 		if r.Note != "" {
-			note = " — " + r.Note
+			note = " — " + sanitizeDisplay(r.Note)
 		}
-		return fmt.Sprintf("%s %s -> %s [file] %s%s", t, r.From, r.To, r.Path, note)
+		return fmt.Sprintf("%s %s -> %s [file] %s%s", t, from, to, sanitizeDisplay(r.Path), note)
 	default:
-		return fmt.Sprintf("%s %s -> %s  %s", t, r.From, r.To, r.Text)
+		return fmt.Sprintf("%s %s -> %s  %s", t, from, to, sanitizeDisplay(r.Text))
 	}
 }
 
