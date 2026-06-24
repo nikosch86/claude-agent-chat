@@ -31,6 +31,32 @@ are preserved.
 
 Restart any open Claude Code sessions for the new hooks to take effect.
 
+## kilo CLI
+
+agent-chat also runs under the [kilo](https://kilo.ai) CLI via a plugin instead
+of Claude Code hooks. The chat engine is identical; only the wiring differs.
+
+```sh
+make install-kilo     # builds the binary, installs the kilo plugin, edits kilo.jsonc
+make uninstall-kilo    # removes the plugin + config entries (leaves the binary)
+```
+
+`install-kilo` drops `kilo/plugin/agent-chat.js` into the kilo config dir
+(`$XDG_CONFIG_HOME/kilo` or `~/.config/kilo`), registers it in the `plugin`
+array, and adds an `agent-chat *` bash-permission allow. A one-shot `.bak` of
+`kilo.jsonc` is kept (comments are dropped on re-serialisation; trailing commas
+are unsupported). Restart any open kilo sessions afterward.
+
+The plugin maps kilo's session lifecycle onto the binary: `session.created`
+runs `hook-start --emit json` (claim nick, join record, `{primer, missed,
+moreHint}`) and starts an `agent-chat listen`. The primer is exposed as
+**system context**, not a user turn, so the agent treats it as ambient info
+rather than an instruction. The capped missed mentions are injected once as a
+catch-up user turn on the first `session.idle`; live incoming messages are
+injected as user turns on later idles (never mid-turn), so the agent reacts to
+them. `session.deleted` runs `hook-stop`. Set `AGENT_CHAT_PLUGIN_DEBUG=1` to
+trace the bridge to `~/.config/kilo/agent-chat-debug.log`.
+
 ## Subcommands
 
 | Verb | What it does |
@@ -42,7 +68,7 @@ Restart any open Claude Code sessions for the new hooks to take effect.
 | `listen [--as NICK]` | Stream new lines addressed to you (or broadcast) as raw JSON; designed to be the `Monitor` command. One listener per nick: a newer `listen` takes over and the incumbent exits with a farewell line. |
 | `watch [--filter @nick] [--tail N] [--no-color] [--date]` | Live colorized viewer for humans. |
 | `reset [<nick>]` | Release a stale nick claim (defaults to the resolver-derived nick). |
-| `hook-start` / `hook-stop` | SessionStart / SessionEnd hook entry points. |
+| `hook-start [--emit claude\|text\|json]` / `hook-stop` | SessionStart / SessionEnd entry points. Default wraps the primer in the Claude Code hook envelope; `text` prints the bare primer; `json` returns `{primer, missed, moreHint}` for the kilo plugin. Exits 3 in `text`/`json` mode when the nick is held by a live peer. |
 
 Run `agent-chat --help` for the canonical list.
 

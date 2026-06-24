@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -29,6 +30,19 @@ const (
 func runHookStart(args []string) int {
 	drainStdin()
 
+	// --emit selects the output framing. "claude" (default) prints the
+	// SessionStart hook envelope Claude Code consumes; "text" prints the bare
+	// primer to stdout for harnesses (e.g. the kilo plugin) that inject it
+	// themselves. The side effects — nick claim, join record, missed scan — are
+	// identical for both.
+	fs := flag.NewFlagSet("hook-start", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	emit := fs.String("emit", "claude", "output format: claude (hook envelope) | text (plain primer)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	mode := *emit
+
 	if os.Getenv("CLAUDE_AGENT_CHAT") == "0" {
 		return 0
 	}
@@ -51,6 +65,13 @@ func runHookStart(args []string) int {
 
 	if claimedByOther(nick) {
 		if recentActivity(nick, staleWindow, time.Now()) {
+			// Plugin modes signal "claimed by an active peer — did NOT join" with
+			// a distinct exit code so the consumer knows not to start a listener
+			// under this nick (which would hijack the live owner's inbox). They
+			// key off the code, not stdout, so emit nothing.
+			if mode == "text" || mode == "json" {
+				return 3
+			}
 			return emitHookOutput(sessionStartEv, buildNotJoinedPrimer(nick))
 		}
 		if err := appendRecord(Record{Ts: nowEpochMs(), From: nick, Event: "quit"}); err != nil {
@@ -84,8 +105,46 @@ func runHookStart(args []string) int {
 	pruneOldArtifacts(time.Now())
 
 	peers, _ := activePeers()
-	primer := buildJoinPrimer(nick, peers, missed)
-	return emitHookOutput(sessionStartEv, primer)
+	switch mode {
+	case "text":
+		// Human/debug view: the passive kilo primer only.
+		return emitPrimer(mode, sessionStartEv, buildJoinPrimerKilo(nick, peers))
+	case "json":
+		// kilo plugin view: passive primer for system context + the capped
+		// missed mentions for the plugin to inject as an actionable catch-up
+		// turn (mirrors how Claude surfaces missed mentions at session start).
+		shown, hint := missedSection(missed)
+		return emitKiloJSON(buildJoinPrimerKilo(nick, peers), shown, hint)
+	default:
+		return emitPrimer(mode, sessionStartEv, buildJoinPrimer(nick, peers, missed))
+	}
+}
+
+// kiloHookOutput is the --emit json payload consumed by the kilo plugin.
+type kiloHookOutput struct {
+	Primer   string   `json:"primer"`
+	Missed   []string `json:"missed,omitempty"`
+	MoreHint string   `json:"moreHint,omitempty"`
+}
+
+func emitKiloJSON(primer string, missed []string, moreHint string) int {
+	enc := json.NewEncoder(os.Stdout)
+	if err := enc.Encode(kiloHookOutput{Primer: primer, Missed: missed, MoreHint: moreHint}); err != nil {
+		fmt.Fprintf(os.Stderr, "hook-start: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// emitPrimer renders the join primer in the framing selected by --emit:
+// "text" prints it raw to stdout (the consumer injects it), anything else
+// wraps it in the Claude Code SessionStart hook envelope.
+func emitPrimer(mode, eventName, primer string) int {
+	if mode == "text" {
+		fmt.Println(primer)
+		return 0
+	}
+	return emitHookOutput(eventName, primer)
 }
 
 func runHookStop(args []string) int {
@@ -321,6 +380,53 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 	return b.String()
 }
 
+// buildJoinPrimerKilo renders the join context for the kilo plugin, which
+// injects it as a SYSTEM message rather than a user turn. The framing is
+// deliberately passive: a small/eager model that receives an imperative
+// user-role primer will act on it unprompted (read the repo, message peers on a
+// bare "hi"). This version states plainly that it is ambient context and that
+// the agent must take no action until a real incoming message arrives or the
+// user asks.
+func buildJoinPrimerKilo(nick string, peers []string) string {
+	var b strings.Builder
+	b.WriteString("## Agent Chat — ambient context, NOT a task\n\n")
+	b.WriteString("You are connected to a shared chat between agents as `" + nick + "`. This is background information only. Do NOT act on it: do not read files, do not contact peers, do not reply to this notice. Just do what the user asks.\n\n")
+	b.WriteString("Messages addressed to you are delivered into this session automatically as they arrive, prefixed \"New agent-chat message\". ONLY when such a message arrives — or when the user explicitly asks you to — use:\n")
+	b.WriteString("  agent-chat send @peer 'text'            # reply (single-quote the body)\n")
+	b.WriteString("  agent-chat share @peer --file PATH      # share a file (longer than a paragraph)\n")
+	b.WriteString("  agent-chat peers                        # who's around\n")
+	b.WriteString("  agent-chat history --to me              # catch up on earlier messages\n\n")
+
+	peerList := "(none)"
+	if filtered := filterOut(peers, nick); len(filtered) > 0 {
+		peerList = strings.Join(filtered, ", ")
+	}
+	fmt.Fprintf(&b, "Active peers: %s.\n", peerList)
+
+	b.WriteString("\nNotes:\n")
+	fmt.Fprintf(&b, "  - You are the authority on this repo (`%s`); peers may ask you about it.\n", nick)
+	b.WriteString("  - Single-quote message bodies so your shell does not expand $(...) or backticks.\n")
+	b.WriteString("  - Do not read peer repos directly; ask a peer to `share` a file instead. Shared paths live under ~/.agent-chat/artifacts/.\n")
+	return b.String()
+}
+
+// missedSection caps the missed mentions to the latest missedPreviewMax and,
+// when there are more, returns a `history` command covering the remainder —
+// the same cap the Claude join primer applies, reused for the kilo --emit json
+// catch-up so a long absence never dumps an unbounded backlog into one turn.
+func missedSection(missed []string) (shown []string, hint string) {
+	if len(missed) <= missedPreviewMax {
+		return missed, ""
+	}
+	shown = missed[len(missed)-missedPreviewMax:]
+	if anchor := missedSinceAnchor(missed[0]); anchor != "" {
+		hint = fmt.Sprintf("agent-chat history --to me --since %s", anchor)
+	} else {
+		hint = fmt.Sprintf("agent-chat history --to me --tail %d", len(missed))
+	}
+	return shown, hint
+}
+
 // missedSinceAnchor returns an RFC3339 timestamp one second before the oldest
 // missed line, for use as `history --since`. The one-second slack keeps the
 // `>=` comparison in history inclusive despite sub-second rounding. Returns ""
@@ -331,7 +437,7 @@ func missedSinceAnchor(oldest string) string {
 	if err := json.Unmarshal([]byte(oldest), &r); err != nil {
 		return ""
 	}
-	return time.UnixMilli(int64(float64(r.Ts)*1000)).Add(-time.Second).Format(time.RFC3339)
+	return time.UnixMilli(int64(float64(r.Ts) * 1000)).Add(-time.Second).Format(time.RFC3339)
 }
 
 func filterOut(ss []string, drop string) []string {

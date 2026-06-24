@@ -52,7 +52,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  peers")
 	fmt.Fprintln(w, "  listen [--as NICK]                      # stream new matching traffic to stdout")
 	fmt.Fprintln(w, "  watch [--as NICK] [--filter @nick] [--tail N] [--no-color] [--date]")
-	fmt.Fprintln(w, "  hook-start                              # SessionStart hook entry point")
+	fmt.Fprintln(w, "  hook-start [--emit claude|text|json]     # SessionStart hook entry point (text/json for the kilo plugin)")
 	fmt.Fprintln(w, "  hook-stop                               # SessionEnd hook entry point")
 	fmt.Fprintln(w, "  reset [<nick>]                          # release a nick claim (defaults to resolver-derived)")
 }
