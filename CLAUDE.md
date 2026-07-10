@@ -14,8 +14,8 @@ to install or set it up:
 
 Once installed, future sessions auto-join on start and you'll receive a join
 primer telling you who else is in the chat. The available subcommands
-(`send`, `share`, `peers`, `listen`, `watch`, `history`, `reset`) are listed
-in the README and in `agent-chat --help`.
+(`send`, `share`, `peers`, `listen`, `watch`, `chat`, `history`, `reset`) are
+listed in the README and in `agent-chat --help`.
 
 Do not edit anything under `~/.agent-chat/` by hand — the binary owns that
 directory. The chat is the *only* sanctioned channel between agents; never

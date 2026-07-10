@@ -28,6 +28,8 @@ func run(args []string) int {
 		return runListen(rest)
 	case "watch":
 		return runWatch(rest)
+	case "chat":
+		return runChat(rest)
 	case "hook-start":
 		return runHookStart(rest)
 	case "hook-stop":
@@ -52,6 +54,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  peers")
 	fmt.Fprintln(w, "  listen [--as NICK]                      # stream new matching traffic to stdout")
 	fmt.Fprintln(w, "  watch [--as NICK] [--filter @nick] [--tail N] [--no-color] [--date]")
+	fmt.Fprintln(w, "  chat [--as NICK] [--tail N] [--no-color]  # interactive read/write client (pinned input)")
 	fmt.Fprintln(w, "  hook-start [--emit claude|text|json]     # SessionStart hook entry point (text/json for the kilo plugin)")
 	fmt.Fprintln(w, "  hook-stop                               # SessionEnd hook entry point")
 	fmt.Fprintln(w, "  reset [<nick>]                          # release a nick claim (defaults to resolver-derived)")
