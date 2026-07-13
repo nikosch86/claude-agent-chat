@@ -274,6 +274,44 @@ func TestHookStartInlinesMissedMessages(t *testing.T) {
 	}
 }
 
+// The join primer injects missed mentions straight into SessionStart context,
+// where nothing clips them: unshaped, a peer's long message lands whole in a
+// fresh session's window.
+func TestHookStartShapesOversizedMissedMessage(t *testing.T) {
+	home, _ := cleanHookEnv(t)
+	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")
+
+	body := "OPENER: the summary sentence. " + strings.Repeat("padding ", 2000)
+	rec := Record{Ts: 1500.000, From: "bob", To: "@alice", Text: body}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeLog(t, home, string(raw))
+	if err := writeCursor("alice", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	out, rc := captureStdout(t, func() int { return run([]string{"hook-start"}) })
+	if rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	primer := parsePrimer(t, out)
+
+	if strings.Contains(primer, body) {
+		t.Errorf("primer inlined the whole %d-byte body — unbounded context injection", len(body))
+	}
+	if len(primer) > 4000 {
+		t.Errorf("primer is %d bytes; one long missed message should not blow it up", len(primer))
+	}
+	if !strings.Contains(primer, "OPENER: the summary sentence.") {
+		t.Errorf("primer should still preview the message:\n%s", primer)
+	}
+	if !strings.Contains(primer, "history --id 1500.000") {
+		t.Errorf("primer should hand over the command to read it whole:\n%s", primer)
+	}
+}
+
 func TestHookStartTruncatesManyMissed(t *testing.T) {
 	home, _ := cleanHookEnv(t)
 	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")

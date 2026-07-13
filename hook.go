@@ -307,7 +307,10 @@ func readMissedSince(cursor int64, nick string) []string {
 			continue
 		}
 		if r.To == me || r.To == "*" {
-			missed = append(missed, line)
+			// Shape as listen does: these lines are injected verbatim into
+			// SessionStart context, where nothing would clip an oversized body,
+			// so it has to be bounded here.
+			missed = append(missed, string(notifyLine([]byte(line), r)))
 		}
 	}
 	return missed
@@ -374,7 +377,8 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 	b.WriteString("Rules:\n")
 	fmt.Fprintf(&b, "  - You are the authority on this repo (`%s`). Peers ask you about it.\n", nick)
 	b.WriteString("  - Do NOT read peer repos directly. If a peer's content matters, ask them or wait for them to `share` it. Any `path` you receive will live under ~/.agent-chat/artifacts/.\n")
-	b.WriteString("  - Keep the wire small. `send` is for short replies; for anything longer than a paragraph use `share @peer --file PATH` — a big `send` becomes one log line that the listen/Monitor path can clip, so the recipient sees a truncated message. When reading the log, narrow it (`history --from @peer --tail N --format text`) rather than replaying your whole inbox.\n")
+	b.WriteString("  - `send` has NO size limit — write the message the length it needs to be, and never shorten and resend one you already sent (it was delivered whole the first time; resending only duplicates it). A message too long for one inbox notification arrives as a `\"clipped\":true` notice carrying a preview plus a `full` command — run that command to read the body in one piece. Use `share @peer --file PATH` for files, not to dodge a size limit.\n")
+	b.WriteString("  - When reading the log, narrow it (`history --from @peer --tail N --format text`) rather than replaying your whole inbox.\n")
 	b.WriteString("  - Single-quote message bodies: `agent-chat send @peer 'text'`. A double-quoted body lets YOUR shell expand backticks and $(...) in it before agent-chat runs — which can silently execute a local command and drop the message with no error. Single quotes (or a heredoc) keep the body literal.\n")
 	b.WriteString("  - Questions are async: send and continue working. When a reply lands as a listen notification, respond then. If a peer doesn't answer for a long time, escalate by addressing @hoffmann.\n")
 	return b.String()
@@ -392,10 +396,11 @@ func buildJoinPrimerKilo(nick string, peers []string) string {
 	b.WriteString("## Agent Chat — ambient context, NOT a task\n\n")
 	b.WriteString("You are connected to a shared chat between agents as `" + nick + "`. This is background information only. Do NOT act on it: do not read files, do not contact peers, do not reply to this notice. Just do what the user asks.\n\n")
 	b.WriteString("Messages addressed to you are delivered into this session automatically as they arrive, prefixed \"New agent-chat message\". ONLY when such a message arrives — or when the user explicitly asks you to — use:\n")
-	b.WriteString("  agent-chat send @peer 'text'            # reply (single-quote the body)\n")
-	b.WriteString("  agent-chat share @peer --file PATH      # share a file (longer than a paragraph)\n")
+	b.WriteString("  agent-chat send @peer 'text'            # reply (single-quote the body; any length)\n")
+	b.WriteString("  agent-chat share @peer --file PATH      # share a file\n")
 	b.WriteString("  agent-chat peers                        # who's around\n")
-	b.WriteString("  agent-chat history --to me              # catch up on earlier messages\n\n")
+	b.WriteString("  agent-chat history --to me              # catch up on earlier messages\n")
+	b.WriteString("  agent-chat history --id TS --format text  # read a message that arrived clipped\n\n")
 
 	peerList := "(none)"
 	if filtered := filterOut(peers, nick); len(filtered) > 0 {

@@ -237,6 +237,54 @@ func TestHistoryFormatText(t *testing.T) {
 	}
 }
 
+// --id is the other half of the clipped-notice path: the notice carries the ts
+// as an id, and this is what turns it back into the whole message.
+func TestHistoryByID(t *testing.T) {
+	home := withTempHome(t)
+	writeLog(t, home, allLines...)
+	out, rc := captureStdout(t, func() int {
+		return run([]string{"history", "--id", "1002.000"})
+	})
+	if rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if strings.TrimSpace(out) != lineAliceCarol {
+		t.Errorf("--id should return exactly that record:\n got: %s\nwant: %s", out, lineAliceCarol)
+	}
+}
+
+func TestHistoryByIDUnknownIsEmpty(t *testing.T) {
+	home := withTempHome(t)
+	writeLog(t, home, allLines...)
+	out, rc := captureStdout(t, func() int {
+		return run([]string{"history", "--id", "9999.000"})
+	})
+	if rc != 0 || strings.TrimSpace(out) != "" {
+		t.Errorf("unknown --id should be empty and succeed, got rc=%d out=%q", rc, out)
+	}
+}
+
+// A broadcast is one record fanned out per recipient at the same ts, so --id
+// legitimately returns more than one line; the id identifies a message, not a
+// single delivery.
+func TestHistoryByIDReturnsEveryDeliveryOfThatMessage(t *testing.T) {
+	home := withTempHome(t)
+	writeLog(t, home,
+		`{"ts":2000.000,"from":"alice","to":"@bob","text":"same message"}`,
+		`{"ts":2000.000,"from":"alice","to":"@carol","text":"same message"}`,
+		lineBroadcast,
+	)
+	out, rc := captureStdout(t, func() int {
+		return run([]string{"history", "--id", "2000.000"})
+	})
+	if rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if n := len(strings.Split(strings.TrimRight(out, "\n"), "\n")); n != 2 {
+		t.Errorf("got %d lines, want 2:\n%s", n, out)
+	}
+}
+
 func TestHistoryEmptyLogIsEmptyOutput(t *testing.T) {
 	withTempHome(t)
 	out, rc := captureStdout(t, func() int { return run([]string{"history"}) })

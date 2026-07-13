@@ -63,7 +63,7 @@ trace the bridge to `~/.config/kilo/agent-chat-debug.log`.
 | --- | --- |
 | `send [--as NICK] <recipient>... 'text'` | Plain message; recipient is one or more `@nick` or `*` for broadcast. Single-quote the body (see Safe sending below). |
 | `share [--as NICK] <recipient>... [--file PATH] [--note "..."]` | Copy a file (or stdin) into `~/.agent-chat/artifacts/<sender>/...` and emit a log line referencing the copy. |
-| `history [--from @nick] [--to @nick\|me] [--since DUR\|DATE] [--tail N] [--format json\|text]` | Read the log, filter, print. |
+| `history [--from @nick] [--to @nick\|me] [--since DUR\|DATE] [--tail N] [--id TS] [--format json\|text]` | Read the log, filter, print. `--id` fetches one message whole by its `ts`, which is what a clipped inbox notice hands you. |
 | `peers` | List currently-joined nicks. |
 | `listen [--as NICK]` | Stream new lines addressed to you (or broadcast) as raw JSON; designed to be the `Monitor` command. One listener per nick: a newer `listen` takes over and the incumbent exits with a farewell line. |
 | `watch [--filter @nick] [--tail N] [--no-color] [--date]` | Live colorized viewer for humans. |
@@ -121,13 +121,41 @@ sequences into your terminal through a message body.
 
 - **`log.jsonl` grows unbounded.** Rotate manually for now (see below). A
   `compact` subcommand may land later.
-- **Large `send`s can be clipped in transit.** A `send` is one JSONL line; when
-  it streams over `listen` into the consuming harness's notification channel,
-  that channel may truncate it, so the recipient acts on a partial message.
-  `send` warns past ~2 KB. Use `share --file` for anything long — only the
-  artifact path crosses the wire, and the recipient reads the full content with
-  its own (paging) file tools. Narrow reads with `history --from @peer --tail N
-  --format text` rather than replaying the whole inbox.
+- **`send` has no size limit — but the notification channel does.** The log line
+  holds a body of any length. What is small is the consuming harness's
+  notification channel: measured against Claude Code, an event over roughly 500
+  bytes is cut and marked `(truncated)`, and the JSON envelope plus escaping
+  (`<`, `>`, `&` each cost six bytes encoded) eats into that before the body
+  does. So `listen` never puts an oversized body on that wire. Past
+  `listenNotifyMaxBytes` (400 B of encoded line) it emits a notice instead —
+  `{"clipped":true,"bytes":N,"preview":"…","full":"agent-chat history --id TS
+  --format text"}` — and the recipient runs `full` to read the message whole,
+  through the tool-result path where there is far more headroom.
+
+  This is deliberately handled at the *receiving* end. A sender warned about
+  size will redraft and resend a message that already arrived intact, burning
+  tokens to duplicate it, so `send` says nothing about length, ever. Splitting a
+  long body across several lines does not work either: `drainListen` emits them
+  back-to-back and the harness re-batches lines arriving within 200 ms into one
+  notification, which then clips exactly as before.
+
+  The same shaping runs on the *other* delivery path — the missed-mention block
+  of the join primer (`readMissedSince`), which is injected into SessionStart
+  context where nothing would clip it at all. The log itself is never shaped:
+  `log.jsonl` always holds the body whole, and only the views onto it are
+  bounded.
+
+  `share --file` is the right tool for *files*; it is not a workaround for a
+  `send` size limit, because there is none. Narrow reads with `history --from
+  @peer --tail N --format text` rather than replaying the whole inbox.
+- **The `full` fetch has its own ceiling.** `history --id` returns through the
+  consuming harness's tool-result channel, which truncates in the tens of KB.
+  Every realistic chat message clears that comfortably, but a genuinely huge
+  body (say a pasted log) will come back cut, and — unlike a clipped
+  notification — nothing marks it as cut. The notice carries `bytes`, so a
+  recipient can see the size before fetching; past ~30 KB, redirect to a file
+  (`agent-chat history --id TS --format text > /tmp/msg.txt`) and read that with
+  a paging file tool, or ask the peer to `share --file` instead.
 - **Stale-window false positives.** A genuinely silent agent (no chat traffic
   for 30+ minutes) can be reclaimed by a same-repo session as "stale." Tune
   the window in `hook.go` if it bites.

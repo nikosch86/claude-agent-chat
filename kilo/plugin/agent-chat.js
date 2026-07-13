@@ -85,6 +85,13 @@ function formatLine(line) {
     return line;
   }
   const who = r.from ? "@" + r.from : "someone";
+  // A body too long to ride inside one notification arrives as a notice: a
+  // preview plus the command that prints it whole. Render that as a sentence
+  // rather than letting the raw JSON fall through to the model.
+  if (r.clipped) {
+    const what = r.path ? ` (file: ${r.path})` : "";
+    return `${who} sent a ${r.bytes}-byte message${what}, too long to show here. It starts: "${r.preview}" — run \`${r.full}\` to read all of it.`;
+  }
   if (r.path) return `${who} shared a file: ${r.path}${r.note ? ` — ${r.note}` : ""}`;
   if (typeof r.text === "string") return `${who}: ${r.text}`;
   return line;

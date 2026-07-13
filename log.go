@@ -11,7 +11,14 @@ import (
 type epochMs float64
 
 func (e epochMs) MarshalJSON() ([]byte, error) {
-	return []byte(strconv.FormatFloat(float64(e), 'f', 3, 64)), nil
+	return []byte(e.String()), nil
+}
+
+// String is the canonical rendering of a timestamp, and doubles as a record's
+// id: it is exactly the `ts` token in the log line, so `history --id` can match
+// on it without re-parsing floats (where rounding would bite).
+func (e epochMs) String() string {
+	return strconv.FormatFloat(float64(e), 'f', 3, 64)
 }
 
 // Record is the JSONL wire schema. Field order here determines field order

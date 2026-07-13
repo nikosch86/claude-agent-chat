@@ -131,7 +131,7 @@ func drainListen(cursor int64, me, nick string, out io.Writer) int64 {
 		if r.To != me && r.To != "*" {
 			continue
 		}
-		out.Write(append(line, '\n'))
+		out.Write(append(notifyLine(line, r), '\n'))
 		_ = writeCursor(nick, cursor)
 	}
 	// Persist once at the end so non-matching traffic isn't rescanned next

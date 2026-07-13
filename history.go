@@ -21,6 +21,7 @@ func runHistory(args []string) int {
 	since := fs.String("since", "", "DUR (1h, 30m, 2d) or DATE (2026-05-24 / RFC3339)")
 	tail := fs.Int("tail", 0, "keep only the last N matches (0 = all)")
 	format := fs.String("format", "json", "json | text")
+	id := fs.String("id", "", "fetch one message by its `ts` id (as printed by listen)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -79,7 +80,7 @@ func runHistory(args []string) int {
 	}
 	defer f.Close()
 
-	rc := writeHistory(f, os.Stdout, *format, fromNick, wantTo, meMode, sinceTs, haveSince, *tail)
+	rc := writeHistory(f, os.Stdout, *format, fromNick, wantTo, meMode, sinceTs, haveSince, *tail, *id)
 	if rc == 0 {
 		if n, err := resolveNick(*as); err == nil {
 			maybeWarnListener(os.Stderr, n)
@@ -88,7 +89,7 @@ func runHistory(args []string) int {
 	return rc
 }
 
-func writeHistory(in io.Reader, out io.Writer, format, fromNick, wantTo string, meMode bool, sinceTs float64, haveSince bool, tail int) int {
+func writeHistory(in io.Reader, out io.Writer, format, fromNick, wantTo string, meMode bool, sinceTs float64, haveSince bool, tail int, id string) int {
 	type entry struct {
 		raw []byte
 		rec Record
@@ -101,6 +102,9 @@ func writeHistory(in io.Reader, out io.Writer, format, fromNick, wantTo string, 
 		line := append([]byte(nil), s.Bytes()...)
 		var r Record
 		if err := json.Unmarshal(line, &r); err != nil {
+			continue
+		}
+		if id != "" && r.Ts.String() != id {
 			continue
 		}
 		if fromNick != "" && r.From != fromNick {

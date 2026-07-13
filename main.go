@@ -50,7 +50,7 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "usage: agent-chat <subcommand> [args...]")
 	fmt.Fprintln(w, "  send [--as NICK] <recipient>... \"text\"")
 	fmt.Fprintln(w, "  share [--as NICK] <recipient>... (--file PATH | <stdin>) [--note \"...\"]")
-	fmt.Fprintln(w, "  history [--from @nick] [--to @nick|me] [--since DUR|DATE] [--tail N] [--format json|text] [--as NICK]")
+	fmt.Fprintln(w, "  history [--from @nick] [--to @nick|me] [--since DUR|DATE] [--tail N] [--id TS] [--format json|text] [--as NICK]")
 	fmt.Fprintln(w, "  peers")
 	fmt.Fprintln(w, "  listen [--as NICK]                      # stream new matching traffic to stdout")
 	fmt.Fprintln(w, "  watch [--as NICK] [--filter @nick] [--tail N] [--no-color] [--date]")

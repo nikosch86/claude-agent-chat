@@ -53,6 +53,9 @@ func readLines(t *testing.T, p string) []string {
 	defer f.Close()
 	var out []string
 	s := bufio.NewScanner(f)
+	// Match the buffer the production readers use — a log line legitimately
+	// carries a body far past the scanner's 64KB default.
+	s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for s.Scan() {
 		out = append(out, s.Text())
 	}
@@ -190,34 +193,29 @@ func TestSendRejectsEmptyText(t *testing.T) {
 	}
 }
 
-func TestSendWarnsOnLargeText(t *testing.T) {
-	home := withTempHome(t)
-	big := strings.Repeat("x", sendTextWarnBytes+1)
-	cmd := exec.Command(builtBinary, "send", "--as", "alice", "@bob", big)
-	cmd.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("send failed: %v: %s", err, out)
-	}
-	if !strings.Contains(string(out), "can be clipped") || !strings.Contains(string(out), "share") {
-		t.Errorf("large send should warn and point at share, got: %s", out)
-	}
-	// The message is still delivered — the warning is advisory, not a block.
-	if lines := readLines(t, filepath.Join(home, "log.jsonl")); len(lines) != 1 {
-		t.Fatalf("got %d lines, want 1", len(lines))
-	}
-}
-
-func TestSendNoWarnOnSmallText(t *testing.T) {
-	home := withTempHome(t)
-	cmd := exec.Command(builtBinary, "send", "--as", "alice", "@bob", "a short reply")
-	cmd.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("send failed: %v: %s", err, out)
-	}
-	if strings.Contains(string(out), "can be clipped") {
-		t.Errorf("small send should not warn, got: %s", out)
+// A sender told its message is too big rewrites and resends one that already
+// arrived whole. send must stay silent about size, at every size, and store the
+// body intact.
+func TestSendIsSilentAtAnySize(t *testing.T) {
+	for _, size := range []int{16, 2000, 64 * 1024} {
+		home := withTempHome(t)
+		big := strings.Repeat("x", size)
+		cmd := exec.Command(builtBinary, "send", "--as", "alice", "@bob", big)
+		cmd.Env = append(os.Environ(), "AGENT_CHAT_HOME="+home)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("send(%d) failed: %v: %s", size, err, out)
+		}
+		if strings.TrimSpace(string(out)) != "" {
+			t.Errorf("send(%d) should be silent, got: %s", size, out)
+		}
+		lines := readLines(t, filepath.Join(home, "log.jsonl"))
+		if len(lines) != 1 {
+			t.Fatalf("send(%d): got %d lines, want 1", size, len(lines))
+		}
+		if got := decodeOne(t, lines[0])["text"]; got != big {
+			t.Errorf("send(%d): body not stored intact (len %d)", size, len(got.(string)))
+		}
 	}
 }
 
