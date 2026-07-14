@@ -44,7 +44,7 @@ func runWatch(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	nick, err := resolveNick(*as)
+	nick, err := resolveNickHuman(*as)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "watch: %v\n", err)
 		return 2

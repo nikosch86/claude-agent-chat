@@ -33,6 +33,7 @@ func cleanResolverEnv(t *testing.T) string {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("AGENT_CHAT_NICK", "")
+	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "")
 	t.Setenv("USER", "")
 	chdirTo(t, t.TempDir())
 	return home
@@ -143,15 +144,86 @@ func TestResolveNickFromConfigFile(t *testing.T) {
 	}
 }
 
-func TestResolveNickFromUser(t *testing.T) {
+func TestResolveNickHumanFromUser(t *testing.T) {
 	cleanResolverEnv(t)
 	t.Setenv("USER", "  someuser  ")
-	got, err := resolveNick("")
+	got, err := resolveNickHuman("")
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
 	if got != "someuser" {
 		t.Errorf("got %q, want someuser (trimmed)", got)
+	}
+}
+
+// The agent-facing resolver must never fall back to $USER: a session whose
+// by-cwd claim was torn down would silently relabel its traffic as the human
+// (the "agent sends as eljeffe" incident). It errors instead.
+func TestResolveNickAgentNeverFallsBackToUser(t *testing.T) {
+	cleanResolverEnv(t)
+	t.Setenv("USER", "someuser")
+	if got, err := resolveNick(""); err == nil {
+		t.Errorf("want error, got %q", got)
+	}
+}
+
+func TestResolveNickFromClaudeEnv(t *testing.T) {
+	cleanResolverEnv(t)
+	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "madrid migration!")
+	t.Setenv("USER", "someuser")
+	cwd, _ := os.Getwd()
+	writeByCwd(t, cwd, "cwdnick")
+	got, err := resolveNick("")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	// Sanitized the same way the join hook sanitizes, and wins over by-cwd —
+	// the launch env var is the session's identity of record.
+	if got != "madridmigration" {
+		t.Errorf("got %q, want madridmigration", got)
+	}
+}
+
+// A session in a git repo whose claim file vanished re-derives the nick the
+// join hook would have derived (git root basename) instead of falling
+// through to the config/user tiers.
+func TestResolveNickDerivesFromGitRootWhenClaimGone(t *testing.T) {
+	cleanResolverEnv(t)
+	root := initGitRepo(t, t.TempDir())
+	chdirTo(t, root)
+	t.Setenv("USER", "someuser")
+
+	cfgRoot := t.TempDir()
+	cfg := filepath.Join(cfgRoot, "agent-chat", "nick")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte("confignick"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", cfgRoot)
+
+	got, err := resolveNick("")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if want := sanitizeNick(filepath.Base(root)); got != want {
+		t.Errorf("got %q, want %q (git root derivation beats config)", got, want)
+	}
+}
+
+func TestResolveNickDerivesFromAgentChatNickFile(t *testing.T) {
+	cleanResolverEnv(t)
+	cwd, _ := os.Getwd()
+	if err := os.WriteFile(filepath.Join(cwd, ".agent-chat-nick"), []byte("\nfile-nick\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveNick("")
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got != "file-nick" {
+		t.Errorf("got %q, want file-nick", got)
 	}
 }
 
@@ -207,8 +279,11 @@ func TestResolveNickPrecedence(t *testing.T) {
 	if err := os.RemoveAll(cfgRoot); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := resolveNick(""); err != nil || got != "user-nick" {
-		t.Errorf("user fallback, got %q err %v", got, err)
+	if got, err := resolveNickHuman(""); err != nil || got != "user-nick" {
+		t.Errorf("human user fallback, got %q err %v", got, err)
+	}
+	if got, err := resolveNick(""); err == nil {
+		t.Errorf("agent resolver must not fall back to $USER, got %q", got)
 	}
 }
 

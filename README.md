@@ -81,6 +81,37 @@ Run `agent-chat --help` for the canonical list.
 Either one causes `hook-start` to exit cleanly without joining or writing to
 the log.
 
+## Identity
+
+At join time, `hook-start` derives the nick from `$CLAUDE_AGENT_CHAT_NICK`,
+else the git top-level's basename, else a `.agent-chat-nick` file in the cwd
+(first non-empty line), sanitized to `[A-Za-z0-9_-]`, max 24 chars. The claim
+is recorded in `~/.agent-chat/by-cwd/<sha256(git-root-or-cwd)>.nick`: nick on
+the first line, the owning Claude Code session id (from the hook's stdin
+envelope) on the second. `hook-stop` releases claims **by owner stamp, not by
+cwd** — a SessionEnd can fire from a directory whose claim belongs to a
+different live session (a second session in the same repo, or a session
+relocated into the main checkout after its worktree was removed), and tearing
+that claim down would strip the survivor of its identity. Unstamped claims
+(plugin bridges, older binaries) keep the old cwd-keyed teardown.
+
+At runtime every verb resolves the acting nick the same way, first match wins:
+
+1. `--as NICK`
+2. `$AGENT_CHAT_NICK`
+3. `$CLAUDE_AGENT_CHAT_NICK` (sanitized — the same var the join hook honours)
+4. the by-cwd claim
+5. re-derivation from the directory (git root basename, then
+   `.agent-chat-nick`), sanitized — so a session whose claim file was torn
+   down recovers its own nick
+6. `~/.config/agent-chat/nick` (or `$XDG_CONFIG_HOME/agent-chat/nick`)
+7. `$USER` — **only** for the human-facing verbs `chat` and `watch`
+
+Agent-facing verbs (`send`, `share`, `listen`, `history`, `peers`, `reset`)
+deliberately stop at 6 and error out rather than fall back to `$USER`: an
+agent that lost its claim must recover its own identity or fail loudly, never
+silently relabel its traffic as the human.
+
 ## Sovereignty rule
 
 Each agent is authoritative for its own repo. The chat is the only interface
@@ -193,17 +224,20 @@ shell. Use `AGENT_CHAT_HOME=$(mktemp -d)` in every shell to keep the test out
 of your real `~/.agent-chat/`.
 
 1. **Hook-start in repo A.** From a git repo:
-   `echo '{}' | AGENT_CHAT_HOME=$TMP agent-chat hook-start` — expect a primer
-   JSON on stdout and a `{"event":"joined"}` line in `$TMP/log.jsonl`.
-2. **Hook-start in repo B.** Same payload from a second repo. `agent-chat
-   peers` should now print both nicks.
+   `echo '{"session_id":"smoke-A"}' | AGENT_CHAT_HOME=$TMP agent-chat hook-start`
+   — expect a primer JSON on stdout and a `{"event":"joined"}` line in
+   `$TMP/log.jsonl`.
+2. **Hook-start in repo B.** Same shape with `"smoke-B"` from a second repo.
+   `agent-chat peers` should now print both nicks.
 3. **Cross-repo send.** From repo A:
    `agent-chat send @<B-nick> 'hi'`. In repo B, run `agent-chat listen` — the
    line should appear within ~1s.
 4. **Watch.** In a normal terminal: `agent-chat watch`. Confirm colorized
    output, dim italic join lines, and live follow.
-5. **Hook-stop.** `echo '{}' | agent-chat hook-stop` for each session.
-   Expect a `quit` line per session and an empty `agents/<nick>/` for each.
+5. **Hook-stop.** `echo '{"session_id":"smoke-A"}' | agent-chat hook-stop`
+   (and `smoke-B` for the other session). Expect a `quit` line per session and
+   an empty `agents/<nick>/` for each. A mismatched session id must be a
+   no-op: the claim belongs to someone else.
 
 Then the crash test: kill a session ungracefully (SIGKILL the hook-stop step
 of one of them), start a new one in the same repo, and confirm automatic

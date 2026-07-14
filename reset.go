@@ -85,11 +85,41 @@ func byCwdEntriesForNick(nick string) []string {
 		if err != nil {
 			continue
 		}
-		if strings.TrimSpace(string(b)) == nick {
+		if n, _ := parseClaim(b); n == nick {
 			matches = append(matches, p)
 		}
 	}
 	return matches
+}
+
+// claim is one by-cwd claim file and the nick it holds.
+type claim struct {
+	path, nick string
+}
+
+// claimsOwnedBy returns every by-cwd claim stamped with sessionID. Empty for
+// sessionID == "" — an unstamped hook run must never sweep the unstamped
+// claims of other directories.
+func claimsOwnedBy(sessionID string) []claim {
+	if sessionID == "" {
+		return nil
+	}
+	dir := filepath.Join(chatHome(), "by-cwd")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []claim
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".nick") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if nick, owner, ok := readClaimFile(p); ok && owner == sessionID {
+			out = append(out, claim{path: p, nick: nick})
+		}
+	}
+	return out
 }
 
 // claimedByOther reports whether nick has an active by-cwd claim from a

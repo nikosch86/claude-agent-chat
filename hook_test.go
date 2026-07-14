@@ -443,6 +443,115 @@ func TestHookStopNoOpWhenNoByCwd(t *testing.T) {
 	}
 }
 
+// A SessionEnd firing from a directory whose claim belongs to a different
+// session (second session in the same repo, or a session relocated out of a
+// removed worktree) must leave that claim alone: tearing it down strips the
+// live owner of its identity and its next send resolves to somebody else's
+// nick (the "agent sends as the human user" incident).
+func TestHookStopSkipsClaimOwnedByAnotherSession(t *testing.T) {
+	home, _ := cleanHookEnv(t)
+	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")
+
+	withStdin(t, `{"session_id":"sess-A","hook_event_name":"SessionStart"}`)
+	if rc := run([]string{"hook-start"}); rc != 0 {
+		t.Fatalf("hook-start rc = %d", rc)
+	}
+	before := readLines(t, filepath.Join(home, "log.jsonl"))
+
+	withStdin(t, `{"session_id":"sess-B","hook_event_name":"SessionEnd"}`)
+	if rc := run([]string{"hook-stop"}); rc != 0 {
+		t.Fatalf("hook-stop rc = %d", rc)
+	}
+
+	if nick, ok := readByCwd(); !ok || nick != "alice" {
+		t.Errorf("claim owned by sess-A must survive sess-B's hook-stop; got %q ok=%v", nick, ok)
+	}
+	after := readLines(t, filepath.Join(home, "log.jsonl"))
+	if len(after) != len(before) {
+		t.Errorf("no quit should be logged for a foreign claim; log grew from %d to %d lines", len(before), len(after))
+	}
+}
+
+// A session whose cwd moved after joining (worktree removed on exit, cwd
+// relocated into the main checkout) still releases its own claim — found by
+// owner stamp, not by cwd — and does not touch the checkout's claim.
+func TestHookStopReleasesOwnClaimAfterRelocation(t *testing.T) {
+	home, _ := cleanHookEnv(t)
+	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "wt-agent")
+
+	withStdin(t, `{"session_id":"sess-W","hook_event_name":"SessionStart"}`)
+	if rc := run([]string{"hook-start"}); rc != 0 {
+		t.Fatalf("hook-start rc = %d", rc)
+	}
+	claims := byCwdEntriesForNick("wt-agent")
+	if len(claims) != 1 {
+		t.Fatalf("want 1 claim for wt-agent, got %d", len(claims))
+	}
+
+	// Relocate into a directory that holds another live session's claim.
+	other := t.TempDir()
+	chdirTo(t, other)
+	if err := writeByCwdNick("main-agent", "sess-M"); err != nil {
+		t.Fatal(err)
+	}
+
+	withStdin(t, `{"session_id":"sess-W","hook_event_name":"SessionEnd"}`)
+	if rc := run([]string{"hook-stop"}); rc != 0 {
+		t.Fatalf("hook-stop rc = %d", rc)
+	}
+
+	if _, err := os.Stat(claims[0]); !os.IsNotExist(err) {
+		t.Errorf("wt-agent's own claim should be released despite the cwd move: %v", err)
+	}
+	if nick, ok := readByCwd(); !ok || nick != "main-agent" {
+		t.Errorf("main-agent's claim must survive the relocated hook-stop; got %q ok=%v", nick, ok)
+	}
+	lines := readLines(t, filepath.Join(home, "log.jsonl"))
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, `"event":"quit"`) || !strings.Contains(last, `"from":"wt-agent"`) {
+		t.Errorf("last line should be wt-agent's quit: %s", last)
+	}
+}
+
+// An owner-stamped hook-stop still releases a legacy (unstamped) claim at its
+// cwd — written by an older binary or a plugin bridge — so upgrades don't
+// leak claims.
+func TestHookStopReleasesLegacyClaim(t *testing.T) {
+	home, _ := cleanHookEnv(t)
+	if err := writeByCwdNick("old-agent", ""); err != nil {
+		t.Fatal(err)
+	}
+	withStdin(t, `{"session_id":"sess-X","hook_event_name":"SessionEnd"}`)
+	if rc := run([]string{"hook-stop"}); rc != 0 {
+		t.Fatalf("hook-stop rc = %d", rc)
+	}
+	if _, ok := readByCwd(); ok {
+		t.Errorf("legacy claim should be released")
+	}
+	lines := readLines(t, filepath.Join(home, "log.jsonl"))
+	if len(lines) != 1 || !strings.Contains(lines[0], `"from":"old-agent"`) {
+		t.Errorf("want old-agent quit, got %v", lines)
+	}
+}
+
+// An unstamped hook-stop (kilo bridge: no envelope) must not release a claim
+// stamped by a real session.
+func TestHookStopWithoutEnvelopeSkipsStampedClaim(t *testing.T) {
+	home, _ := cleanHookEnv(t)
+	if err := writeByCwdNick("alice", "sess-A"); err != nil {
+		t.Fatal(err)
+	}
+	if rc := run([]string{"hook-stop"}); rc != 0 {
+		t.Fatalf("hook-stop rc = %d", rc)
+	}
+	if nick, ok := readByCwd(); !ok || nick != "alice" {
+		t.Errorf("stamped claim must survive an unstamped hook-stop; got %q ok=%v", nick, ok)
+	}
+	if _, err := os.Stat(filepath.Join(home, "log.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("no quit should be logged: %v", err)
+	}
+}
+
 // TestWriteCursorAtomicUnderConcurrency hammers writeCursor from many
 // goroutines and confirms readCursor never observes a torn write. The check
 // that matters is "ok == true" for every read — a partial write would parse

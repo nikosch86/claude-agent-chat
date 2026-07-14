@@ -28,7 +28,7 @@ const (
 )
 
 func runHookStart(args []string) int {
-	drainStdin()
+	sessionID := readHookEnvelope()
 
 	// --emit selects the output framing. "claude" (default) prints the
 	// SessionStart hook envelope Claude Code consumes; "text" prints the bare
@@ -82,7 +82,7 @@ func runHookStart(args []string) int {
 		clearAgentDir(nick)
 	}
 
-	if err := writeByCwdNick(nick); err != nil {
+	if err := writeByCwdNick(nick, sessionID); err != nil {
 		fmt.Fprintf(os.Stderr, "hook-start: %v\n", err)
 		return 1
 	}
@@ -147,24 +147,44 @@ func emitPrimer(mode, eventName, primer string) int {
 	return emitHookOutput(eventName, primer)
 }
 
+// runHookStop releases the ending session's nick claim(s). Claims are matched
+// by owner stamp, not by cwd: a SessionEnd can fire from a directory whose
+// claim belongs to a *different live* session — a second session sharing the
+// repo, or this session having been relocated into the main checkout after
+// its worktree was removed — and tearing that claim down strips the survivor
+// of its identity (its next send would resolve to somebody else's nick).
+// Matching by owner both spares foreign claims and finds our own claim even
+// when it is keyed under a directory we are no longer in.
 func runHookStop(args []string) int {
-	drainStdin()
+	sessionID := readHookEnvelope()
 
-	nick, ok := readByCwd()
-	if !ok {
-		return 0
+	claims := claimsOwnedBy(sessionID)
+	if len(claims) == 0 {
+		// No owner-stamped claim of ours anywhere: fall back to the cwd's
+		// claim, but only when it is unstamped (written by a plugin bridge
+		// such as kilo, or by an older binary). A claim stamped by a
+		// different session is not ours to release.
+		nick, owner, ok := readClaimFile(byCwdPath())
+		if !ok || owner != "" {
+			return 0
+		}
+		claims = []claim{{path: byCwdPath(), nick: nick}}
 	}
 
-	if err := appendRecord(Record{Ts: nowEpochMs(), From: nick, Event: "quit"}); err != nil {
-		fmt.Fprintf(os.Stderr, "hook-stop: %v\n", err)
-		return 1
-	}
-	if err := writeCursor(nick, currentLogSize()); err != nil {
-		fmt.Fprintf(os.Stderr, "hook-stop: %v\n", err)
-		return 1
-	}
-	if p := byCwdPath(); p != "" {
-		os.Remove(p)
+	quit := map[string]bool{}
+	for _, c := range claims {
+		if !quit[c.nick] {
+			quit[c.nick] = true
+			if err := appendRecord(Record{Ts: nowEpochMs(), From: c.nick, Event: "quit"}); err != nil {
+				fmt.Fprintf(os.Stderr, "hook-stop: %v\n", err)
+				return 1
+			}
+			if err := writeCursor(c.nick, currentLogSize()); err != nil {
+				fmt.Fprintf(os.Stderr, "hook-stop: %v\n", err)
+				return 1
+			}
+		}
+		os.Remove(c.path)
 	}
 	return 0
 }
@@ -173,6 +193,15 @@ func deriveHookNick(cwd string) (string, string) {
 	if v := strings.TrimSpace(os.Getenv("CLAUDE_AGENT_CHAT_NICK")); v != "" {
 		return v, "CLAUDE_AGENT_CHAT_NICK"
 	}
+	return deriveDirNick(cwd)
+}
+
+// deriveDirNick derives a nick from the directory alone: the git top-level's
+// basename when inside a repo, else the first non-empty line of a
+// .agent-chat-nick file in cwd. Shared by the join hook and the runtime
+// resolver, so a session whose by-cwd claim vanished re-derives exactly the
+// nick it joined under. Returns the raw (unsanitized) nick and its source.
+func deriveDirNick(cwd string) (string, string) {
 	if root, err := gitRoot(); err == nil && root != "" {
 		return filepath.Base(root), "git root basename"
 	}
@@ -209,7 +238,10 @@ func sanitizeNick(s string) string {
 	return strings.Trim(out, "-")
 }
 
-func writeByCwdNick(nick string) error {
+// writeByCwdNick claims this directory's key for nick, stamping the owning
+// session id (when known) so hook-stop can prove ownership before tearing the
+// claim down. See parseClaim for the file format.
+func writeByCwdNick(nick, sessionID string) error {
 	p := byCwdPath()
 	if p == "" {
 		return fmt.Errorf("could not determine by-cwd key (no git root and no cwd)")
@@ -217,7 +249,11 @@ func writeByCwdNick(nick string) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, []byte(nick), 0o644)
+	content := nick + "\n"
+	if sessionID != "" {
+		content += sessionID + "\n"
+	}
+	return os.WriteFile(p, []byte(content), 0o644)
 }
 
 func cursorPath(nick string) string {
@@ -470,12 +506,30 @@ func emitHookOutput(eventName, additionalContext string) int {
 	return 0
 }
 
-// drainStdin consumes any piped stdin (the hook envelope) so the parent
-// doesn't get EPIPE. If stdin is a tty (no pipe), do nothing — would block.
-func drainStdin() {
+// hookEnvelope is the JSON Claude Code pipes to hook commands on stdin. Only
+// session_id is consumed: it stamps the by-cwd claim so hook-stop can prove
+// ownership before releasing it.
+type hookEnvelope struct {
+	SessionID string `json:"session_id"`
+}
+
+// readHookEnvelope consumes piped stdin — fully, so the parent never sees
+// EPIPE — and returns the envelope's session id. Returns "" when stdin is a
+// tty or carries no parseable envelope (plugin bridges such as kilo invoke
+// the hooks bare). If stdin is a tty, nothing is read — it would block.
+func readHookEnvelope() string {
 	piped, err := stdinIsPipe()
 	if err != nil || !piped {
-		return
+		return ""
 	}
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
 	io.Copy(io.Discard, os.Stdin)
+	if err != nil {
+		return ""
+	}
+	var env hookEnvelope
+	if json.Unmarshal(b, &env) != nil {
+		return ""
+	}
+	return strings.TrimSpace(env.SessionID)
 }
