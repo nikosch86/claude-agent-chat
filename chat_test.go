@@ -371,3 +371,45 @@ func TestEnterRawWithoutTTY(t *testing.T) {
 		t.Error("enterRaw on a non-tty stdin: want error, got nil")
 	}
 }
+
+// runChat entry paths that terminate before the interactive loop.
+
+func TestChatRejectsWhenNoNickResolvable(t *testing.T) {
+	cleanResolverEnv(t)
+	stderr, rc := captureStderr(t, func() int { return run([]string{"chat"}) })
+	if rc != 2 {
+		t.Errorf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr, "chat: could not resolve nick") {
+		t.Errorf("stderr = %q, want resolver error", stderr)
+	}
+}
+
+func TestChatRejectsNonTTYStdin(t *testing.T) {
+	cleanResolverEnv(t)
+	withStdin(t, "") // a pipe is not a character device
+	stderr, rc := captureStderr(t, func() int { return run([]string{"chat", "--as", "alice"}) })
+	if rc != 2 {
+		t.Errorf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr, "stdin is not a terminal") {
+		t.Errorf("stderr = %q, want non-terminal message", stderr)
+	}
+}
+
+func TestChatFailsWhenRawModeUnavailable(t *testing.T) {
+	cleanResolverEnv(t)
+	// /dev/null is a character device, so the TTY check passes, but stty
+	// cannot configure it and enterRaw fails before the loop starts.
+	withDevNullStdin(t)
+	if _, err := sttyCapture("-g"); err == nil {
+		t.Skip("stty succeeds against this stdin; cannot exercise the raw-mode failure")
+	}
+	stderr, rc := captureStderr(t, func() int { return run([]string{"chat", "--as", "alice"}) })
+	if rc != 1 {
+		t.Errorf("rc = %d, want 1", rc)
+	}
+	if !strings.Contains(stderr, "chat: cannot read terminal state") {
+		t.Errorf("stderr = %q, want raw-mode failure", stderr)
+	}
+}

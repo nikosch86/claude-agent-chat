@@ -163,8 +163,7 @@ func removeEntries(settings map[string]any, binPath, artifactsGlob string) bool 
 	return changed
 }
 
-// addHook appends a Claude Code hook entry of the form
-//   { "hooks": [ { "type": "command", "command": "<command>" } ] }
+// addHook appends {"hooks": [{"type": "command", "command": "<command>"}]}
 // to settings.hooks.<event>, creating intermediate maps/arrays as needed.
 // Returns false if an entry with this exact command already exists.
 func addHook(settings map[string]any, event, command string) bool {

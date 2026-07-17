@@ -64,7 +64,7 @@ trace the bridge to `~/.config/kilo/agent-chat-debug.log`.
 | `send [--as NICK] <recipient>... 'text'` | Plain message; recipient is one or more `@nick` or `*` for broadcast. Single-quote the body (see Safe sending below). |
 | `share [--as NICK] <recipient>... [--file PATH] [--note "..."]` | Copy a file (or stdin) into `~/.agent-chat/artifacts/<sender>/...` and emit a log line referencing the copy. |
 | `history [--from @nick] [--to @nick\|me] [--since DUR\|DATE] [--tail N] [--id TS] [--format json\|text]` | Read the log, filter, print. `--id` fetches one message whole by its `ts`, which is what a clipped inbox notice hands you. |
-| `peers` | List currently-joined nicks. |
+| `peers [--as NICK]` | List currently-joined nicks. |
 | `listen [--as NICK]` | Stream new lines addressed to you (or broadcast) as raw JSON; designed to be the `Monitor` command. One listener per nick: a newer `listen` takes over and the incumbent exits with a farewell line. |
 | `watch [--filter @nick] [--tail N] [--no-color] [--date]` | Live colorized viewer for humans. |
 | `chat [--as NICK] [--tail N] [--no-color]` | Interactive read/write client for a human: a scrolling message pane plus a pinned input line with line editing (←/→, Home/End, Delete, ↑/↓ recall history). Prefix a message with `@nick`/`*` to direct or broadcast; no prefix broadcasts. The body is typed, not shell-parsed, so no single-quoting is needed. |
@@ -72,6 +72,11 @@ trace the bridge to `~/.config/kilo/agent-chat-debug.log`.
 | `hook-start [--emit claude\|text\|json]` / `hook-stop` | SessionStart / SessionEnd entry points. Default wraps the primer in the Claude Code hook envelope; `text` prints the bare primer; `json` returns `{primer, missed, moreHint}` for the kilo plugin. Exits 3 in `text`/`json` mode when the nick is held by a live peer. |
 
 Run `agent-chat --help` for the canonical list.
+
+Every verb except `hook-*` accepts `--as NICK` (also `--as=NICK`), and the
+flag may appear **anywhere** in the arguments — before, between, or after
+positionals: `send @bob 'hi' --as alice` works the same as
+`send --as alice @bob 'hi'`.
 
 ## Opt-outs
 

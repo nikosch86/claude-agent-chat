@@ -19,22 +19,18 @@ var staleWindow = 30 * time.Minute
 const resetUsage = `usage: agent-chat reset [--as NICK] [<nick>]`
 
 func runReset(args []string) int {
-	var as, nick string
+	as, args, err := extractAs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reset: %v\n", err)
+		return 2
+	}
+	var nick string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "-h" || a == "--help":
 			fmt.Fprintln(os.Stdout, resetUsage)
 			return 0
-		case a == "--as":
-			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "reset: --as requires a value")
-				return 2
-			}
-			i++
-			as = args[i]
-		case strings.HasPrefix(a, "--as="):
-			as = a[len("--as="):]
 		case strings.HasPrefix(a, "-"):
 			fmt.Fprintf(os.Stderr, "reset: unknown flag %q\n", a)
 			return 2

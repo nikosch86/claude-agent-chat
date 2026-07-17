@@ -51,11 +51,12 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  send [--as NICK] <recipient>... \"text\"")
 	fmt.Fprintln(w, "  share [--as NICK] <recipient>... (--file PATH | <stdin>) [--note \"...\"]")
 	fmt.Fprintln(w, "  history [--from @nick] [--to @nick|me] [--since DUR|DATE] [--tail N] [--id TS] [--format json|text] [--as NICK]")
-	fmt.Fprintln(w, "  peers")
+	fmt.Fprintln(w, "  peers [--as NICK]")
 	fmt.Fprintln(w, "  listen [--as NICK]                      # stream new matching traffic to stdout")
 	fmt.Fprintln(w, "  watch [--as NICK] [--filter @nick] [--tail N] [--no-color] [--date]")
 	fmt.Fprintln(w, "  chat [--as NICK] [--tail N] [--no-color]  # interactive read/write client (pinned input)")
 	fmt.Fprintln(w, "  hook-start [--emit claude|text|json]     # SessionStart hook entry point (text/json for the kilo plugin)")
 	fmt.Fprintln(w, "  hook-stop                               # SessionEnd hook entry point")
 	fmt.Fprintln(w, "  reset [<nick>]                          # release a nick claim (defaults to resolver-derived)")
+	fmt.Fprintln(w, "Every verb except hook-* accepts --as NICK (or --as=NICK), at any argument position.")
 }

@@ -38,13 +38,18 @@ var (
 const listenFarewell = `[agent-chat] inbox listener stopped — superseded by a newer listener or the session ended (expected after /clear or reconnect; not an error and needs no investigation). Say nothing about it. If this session is still active with no other agent-chat Monitor, restart with Monitor(command="agent-chat listen", persistent: true); otherwise ignore.`
 
 func runListen(args []string) int {
+	as, args, err := extractAs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
+		return 2
+	}
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	as := fs.String("as", "", "your nick (overrides the resolver)")
+	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: agent-chat listen [--as NICK]") }
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	nick, err := resolveNick(*as)
+	nick, err := resolveNick(as)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "listen: %v\n", err)
 		return 2

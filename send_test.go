@@ -273,3 +273,14 @@ func TestConcurrentSendsAtomic(t *testing.T) {
 		t.Errorf("distinct messages = %d, want %d", len(seen), n)
 	}
 }
+
+func TestSendRejectsMissingText(t *testing.T) {
+	cleanResolverEnv(t)
+	stderr, rc := captureStderr(t, func() int { return run([]string{"send", "--as", "alice", "@bob"}) })
+	if rc != 2 {
+		t.Errorf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr, `send: usage: send [--as NICK] <recipient>... "text"`) {
+		t.Errorf("stderr = %q, want usage line", stderr)
+	}
+}

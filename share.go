@@ -12,9 +12,14 @@ import (
 )
 
 func runShare(args []string) int {
+	as, args, err := extractAs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "share: %v\n", err)
+		return 2
+	}
 	var (
-		as, file, note string
-		recipients     []string
+		file, note string
+		recipients []string
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -22,15 +27,6 @@ func runShare(args []string) int {
 		case a == "-h" || a == "--help":
 			fmt.Fprintln(os.Stdout, shareUsage)
 			return 0
-		case a == "--as":
-			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "share: --as requires a value")
-				return 2
-			}
-			i++
-			as = args[i]
-		case strings.HasPrefix(a, "--as="):
-			as = a[len("--as="):]
 		case a == "--file":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "share: --file requires a value")

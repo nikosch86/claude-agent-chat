@@ -277,6 +277,9 @@ func TestShareRejectsBadInvocations(t *testing.T) {
 		{"bare nick recipient", []string{"share", "--as", "alice", "bob", "--file", "/tmp/x"}},
 		{"no source (no file, no piped stdin)", []string{"share", "--as", "alice", "@bob"}},
 		{"unknown flag", []string{"share", "--as", "alice", "@bob", "--bogus"}},
+		{"--file without value", []string{"share", "--as", "alice", "@bob", "--file"}},
+		{"--note without value", []string{"share", "--as", "alice", "@bob", "--note"}},
+		{"unreadable --file path", []string{"share", "--as", "alice", "@bob", "--file", "/nonexistent/nope.txt"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -302,5 +305,16 @@ func TestShareFlagEqualsSyntax(t *testing.T) {
 	recs := decodeLog(t, filepath.Join(home, "log.jsonl"))
 	if len(recs) != 1 || recs[0]["note"] != "hi there" {
 		t.Errorf("equals-syntax flags not honoured: %v", recs)
+	}
+}
+
+func TestShareHelpPrintsUsage(t *testing.T) {
+	cleanResolverEnv(t)
+	out, rc := captureStdout(t, func() int { return run([]string{"share", "-h"}) })
+	if rc != 0 {
+		t.Errorf("rc = %d, want 0", rc)
+	}
+	if !strings.Contains(out, "usage: agent-chat share") {
+		t.Errorf("stdout = %q, want usage line", out)
 	}
 }

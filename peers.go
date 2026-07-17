@@ -10,8 +10,14 @@ import (
 )
 
 func runPeers(args []string) int {
+	as, args, err := extractAs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "peers: %v\n", err)
+		return 2
+	}
 	fs := flag.NewFlagSet("peers", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	fs.Usage = func() { fmt.Fprintln(os.Stderr, "usage: agent-chat peers [--as NICK]") }
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -25,7 +31,7 @@ func runPeers(args []string) int {
 		fmt.Fprintln(bw, sanitizeDisplay(n))
 	}
 	bw.Flush()
-	if n, err := resolveNick(""); err == nil {
+	if n, err := resolveNick(as); err == nil {
 		maybeWarnListener(os.Stderr, n)
 	}
 	return 0

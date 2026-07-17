@@ -21,15 +21,23 @@ var chatPollInterval = 200 * time.Millisecond
 // follows the log like `watch` while letting you type messages like `send`,
 // with a pinned input line so incoming traffic never scrambles your typing.
 func runChat(args []string) int {
+	as, args, err := extractAs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "chat: %v\n", err)
+		return 2
+	}
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	as := fs.String("as", "", "your nick (overrides the resolver)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: agent-chat chat [--as NICK] [--tail N] [--no-color]")
+		fs.PrintDefaults()
+	}
 	tail := fs.Int("tail", 30, "initial backlog count")
 	noColor := fs.Bool("no-color", false, "disable ANSI color")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	nick, err := resolveNickHuman(*as)
+	nick, err := resolveNickHuman(as)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "chat: %v\n", err)
 		return 2

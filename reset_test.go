@@ -255,3 +255,46 @@ func TestStaleWindowTunable(t *testing.T) {
 		t.Errorf("5-min-old traffic should NOT be recent with 1m window")
 	}
 }
+
+func TestResetArgHandling(t *testing.T) {
+	t.Run("help prints usage", func(t *testing.T) {
+		cleanResolverEnv(t)
+		out, rc := captureStdout(t, func() int { return run([]string{"reset", "--help"}) })
+		if rc != 0 {
+			t.Errorf("rc = %d, want 0", rc)
+		}
+		if !strings.Contains(out, "usage: agent-chat reset") {
+			t.Errorf("stdout = %q, want usage line", out)
+		}
+	})
+	t.Run("unknown flag", func(t *testing.T) {
+		cleanResolverEnv(t)
+		stderr, rc := captureStderr(t, func() int { return run([]string{"reset", "--bogus"}) })
+		if rc != 2 {
+			t.Errorf("rc = %d, want 2", rc)
+		}
+		if !strings.Contains(stderr, "unknown flag") {
+			t.Errorf("stderr = %q, want unknown-flag message", stderr)
+		}
+	})
+	t.Run("two nick arguments", func(t *testing.T) {
+		cleanResolverEnv(t)
+		stderr, rc := captureStderr(t, func() int { return run([]string{"reset", "alice", "bob"}) })
+		if rc != 2 {
+			t.Errorf("rc = %d, want 2", rc)
+		}
+		if !strings.Contains(stderr, "at most one nick") {
+			t.Errorf("stderr = %q, want at-most-one-nick message", stderr)
+		}
+	})
+	t.Run("no resolvable nick", func(t *testing.T) {
+		cleanResolverEnv(t)
+		stderr, rc := captureStderr(t, func() int { return run([]string{"reset"}) })
+		if rc != 2 {
+			t.Errorf("rc = %d, want 2", rc)
+		}
+		if !strings.Contains(stderr, "reset: could not resolve nick") {
+			t.Errorf("stderr = %q, want resolver error", stderr)
+		}
+	})
+}

@@ -535,3 +535,14 @@ func TestSelfHealWarningFiresFromHistoryAndPeers(t *testing.T) {
 		t.Errorf("peers did not warn: %q", stderr2)
 	}
 }
+
+func TestListenRejectsWhenNoNickResolvable(t *testing.T) {
+	cleanResolverEnv(t)
+	stderr, rc := captureStderr(t, func() int { return run([]string{"listen"}) })
+	if rc != 2 {
+		t.Errorf("rc = %d, want 2", rc)
+	}
+	if !strings.Contains(stderr, "listen: could not resolve nick") {
+		t.Errorf("stderr = %q, want resolver error", stderr)
+	}
+}

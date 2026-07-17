@@ -11,20 +11,25 @@ import (
 // sender told its body is too big redrafts and resends one that already arrived
 // intact. Oversized bodies are shaped for delivery at the receiving end (notifyLine).
 func runSend(args []string) int {
+	as, args, err := extractAs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "send: %v\n", err)
+		return 2
+	}
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	as := fs.String("as", "", "sender nick (overrides the resolver)")
+	fs.Usage = func() { fmt.Fprintln(os.Stderr, `usage: agent-chat send [--as NICK] <recipient>... "text"`) }
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	rest := fs.Args()
-	nick, err := resolveNick(*as)
+	nick, err := resolveNick(as)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "send: %v\n", err)
 		return 2
 	}
 	if len(rest) < 2 {
-		fmt.Fprintln(os.Stderr, `send: usage: send --as NICK <recipient>... "text"`)
+		fmt.Fprintln(os.Stderr, `send: usage: send [--as NICK] <recipient>... "text"`)
 		return 2
 	}
 	text := rest[len(rest)-1]

@@ -343,3 +343,151 @@ func TestHistoryToMeUsesResolverWhenNoAs(t *testing.T) {
 		t.Errorf("bob-recipient leaked:\n%s", out)
 	}
 }
+
+// Every verb must accept --as at any argument position.
+
+func TestExtractAs(t *testing.T) {
+	cases := []struct {
+		args     []string
+		wantAs   string
+		wantRest []string
+		wantErr  bool
+	}{
+		{[]string{"--as", "a", "@b", "hi"}, "a", []string{"@b", "hi"}, false},
+		{[]string{"@b", "--as", "a", "hi"}, "a", []string{"@b", "hi"}, false},
+		{[]string{"@b", "hi", "--as", "a"}, "a", []string{"@b", "hi"}, false},
+		{[]string{"@b", "hi", "--as=a"}, "a", []string{"@b", "hi"}, false},
+		{[]string{"@b", "hi", "-as", "a"}, "a", []string{"@b", "hi"}, false},
+		{[]string{"@b", "hi", "-as=a"}, "a", []string{"@b", "hi"}, false},
+		{[]string{"--as", "a", "--", "--as", "x"}, "a", []string{"--", "--as", "x"}, false},
+		{[]string{"@b", "hi"}, "", []string{"@b", "hi"}, false},
+		{[]string{"@b", "hi", "--as"}, "", nil, true},
+	}
+	for _, c := range cases {
+		as, rest, err := extractAs(c.args)
+		if (err != nil) != c.wantErr {
+			t.Errorf("extractAs(%q) err = %v, wantErr %v", c.args, err, c.wantErr)
+			continue
+		}
+		if err != nil {
+			continue
+		}
+		if as != c.wantAs || strings.Join(rest, "\x00") != strings.Join(c.wantRest, "\x00") {
+			t.Errorf("extractAs(%q) = %q, %q; want %q, %q", c.args, as, rest, c.wantAs, c.wantRest)
+		}
+	}
+}
+
+func TestSendAcceptsAsAtAnyPosition(t *testing.T) {
+	for _, args := range [][]string{
+		{"send", "@bob", "hi", "--as", "alice"},
+		{"send", "@bob", "--as", "alice", "hi"},
+		{"send", "--as=alice", "@bob", "hi"},
+		{"send", "@bob", "hi", "--as=alice"},
+		{"send", "@bob", "hi", "-as", "alice"},
+		{"send", "@bob", "-as=alice", "hi"},
+	} {
+		home := cleanResolverEnv(t)
+		if rc := run(args); rc != 0 {
+			t.Fatalf("run(%q) rc = %d, want 0", args, rc)
+		}
+		lines := readLines(t, filepath.Join(home, "log.jsonl"))
+		if len(lines) != 1 {
+			t.Fatalf("run(%q): want 1 line, got %d", args, len(lines))
+		}
+		m := decodeOne(t, lines[0])
+		if m["from"] != "alice" || m["to"] != "@bob" || m["text"] != "hi" {
+			t.Errorf("run(%q): unexpected record %v", args, m)
+		}
+	}
+}
+
+func TestSendMissingAsValue(t *testing.T) {
+	cleanResolverEnv(t)
+	if rc := run([]string{"send", "@bob", "hi", "--as"}); rc != 2 {
+		t.Errorf("rc = %d, want 2", rc)
+	}
+}
+
+func TestShareAcceptsTrailingAs(t *testing.T) {
+	home := cleanResolverEnv(t)
+	f := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rc := run([]string{"share", "@bob", "--file", f, "--as", "alice"}); rc != 0 {
+		t.Fatalf("share rc = %d, want 0", rc)
+	}
+	lines := readLines(t, filepath.Join(home, "log.jsonl"))
+	if len(lines) != 1 {
+		t.Fatalf("want 1 line, got %d", len(lines))
+	}
+	if !strings.Contains(lines[0], `"from":"alice"`) {
+		t.Errorf("from not alice: %s", lines[0])
+	}
+	wantPrefix := filepath.Join(home, "artifacts", "alice") + string(filepath.Separator)
+	if !strings.Contains(lines[0], wantPrefix) {
+		t.Errorf("artifact path not under artifacts/alice/: %s", lines[0])
+	}
+}
+
+func TestHistoryAcceptsTrailingAs(t *testing.T) {
+	home := cleanResolverEnv(t)
+	writeLog(t, home, lineAliceBob, lineBobAlice)
+	out, rc := captureStdout(t, func() int {
+		return run([]string{"history", "--to", "me", "--format", "text", "--as", "alice"})
+	})
+	if rc != 0 {
+		t.Fatalf("rc = %d", rc)
+	}
+	if !strings.Contains(out, "hi alice") {
+		t.Errorf("missing @alice line:\n%s", out)
+	}
+	if strings.Contains(out, "hi bob") {
+		t.Errorf("bob-recipient leaked:\n%s", out)
+	}
+}
+
+func TestPeersAcceptsAs(t *testing.T) {
+	cleanResolverEnv(t)
+	if _, rc := captureStdout(t, func() int { return run([]string{"peers", "--as", "alice"}) }); rc != 0 {
+		t.Errorf("peers --as rc = %d, want 0", rc)
+	}
+}
+
+func TestResetAcceptsTrailingAs(t *testing.T) {
+	cleanResolverEnv(t)
+	if rc := run([]string{"reset", "@ghost", "--as", "alice"}); rc != 0 {
+		t.Errorf("reset rc = %d, want 0", rc)
+	}
+}
+
+func TestDanglingAsFailsPerVerb(t *testing.T) {
+	for _, verb := range []string{"share", "history", "peers", "listen", "watch", "chat", "reset"} {
+		t.Run(verb, func(t *testing.T) {
+			cleanResolverEnv(t)
+			stderr, rc := captureStderr(t, func() int { return run([]string{verb, "--as"}) })
+			if rc != 2 {
+				t.Errorf("rc = %d, want 2", rc)
+			}
+			if want := verb + ": --as requires a value"; !strings.Contains(stderr, want) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+			}
+		})
+	}
+}
+
+func TestBadFlagPrintsUsagePerVerb(t *testing.T) {
+	for _, verb := range []string{"send", "history", "peers", "listen", "watch", "chat"} {
+		t.Run(verb, func(t *testing.T) {
+			cleanResolverEnv(t)
+			stderr, rc := captureStderr(t, func() int { return run([]string{verb, "--bogus"}) })
+			if rc != 2 {
+				t.Errorf("rc = %d, want 2", rc)
+			}
+			if want := "usage: agent-chat " + verb; !strings.Contains(stderr, want) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+			}
+		})
+	}
+}

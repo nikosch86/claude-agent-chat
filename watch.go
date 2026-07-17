@@ -34,9 +34,17 @@ const (
 )
 
 func runWatch(args []string) int {
+	as, args, err := extractAs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "watch: %v\n", err)
+		return 2
+	}
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	as := fs.String("as", "", "your nick (overrides the resolver)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: agent-chat watch [--as NICK] [--filter @nick] [--tail N] [--no-color] [--date]")
+		fs.PrintDefaults()
+	}
 	filterFlag := fs.String("filter", "", "narrow to traffic mentioning this nick (@nick or nick)")
 	tail := fs.Int("tail", 30, "initial backlog count")
 	noColor := fs.Bool("no-color", false, "disable ANSI color")
@@ -44,7 +52,7 @@ func runWatch(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	nick, err := resolveNickHuman(*as)
+	nick, err := resolveNickHuman(as)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "watch: %v\n", err)
 		return 2

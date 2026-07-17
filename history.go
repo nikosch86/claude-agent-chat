@@ -13,9 +13,17 @@ import (
 )
 
 func runHistory(args []string) int {
+	as, args, err := extractAs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "history: %v\n", err)
+		return 2
+	}
 	fs := flag.NewFlagSet("history", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	as := fs.String("as", "", "your nick (resolves `--to me`)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: agent-chat history [--from @nick] [--to @nick|me] [--since DUR|DATE] [--tail N] [--id TS] [--format json|text] [--as NICK]")
+		fs.PrintDefaults()
+	}
 	fromFlag := fs.String("from", "", "filter by sender (@nick or nick)")
 	toFlag := fs.String("to", "", "filter by recipient (@nick or 'me')")
 	since := fs.String("since", "", "DUR (1h, 30m, 2d) or DATE (2026-05-24 / RFC3339)")
@@ -38,7 +46,7 @@ func runHistory(args []string) int {
 	)
 	if *toFlag != "" {
 		if *toFlag == "me" {
-			nick, err := resolveNick(*as)
+			nick, err := resolveNick(as)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "history: --to me: %v\n", err)
 				return 2
@@ -82,7 +90,7 @@ func runHistory(args []string) int {
 
 	rc := writeHistory(f, os.Stdout, *format, fromNick, wantTo, meMode, sinceTs, haveSince, *tail, *id)
 	if rc == 0 {
-		if n, err := resolveNick(*as); err == nil {
+		if n, err := resolveNick(as); err == nil {
 			maybeWarnListener(os.Stderr, n)
 		}
 	}

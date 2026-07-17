@@ -50,6 +50,32 @@ func resolveNickHuman(asFlag string) (string, error) {
 var errNoNick = fmt.Errorf("could not resolve nick (no --as, $AGENT_CHAT_NICK, $CLAUDE_AGENT_CHAT_NICK, by-cwd claim, git-root/.agent-chat-nick derivation, or ~/.config/agent-chat/nick). " +
 	"If this is a Claude Code session that failed to join, restart with CLAUDE_AGENT_CHAT_NICK=<nick>; for a manual run, pass --as <nick>")
 
+// extractAs strips --as NICK (also --as=NICK, -as, -as=NICK) from args at
+// any position, since stdlib flag stops parsing at the first positional. A
+// bare "--" ends extraction; it and everything after pass through untouched.
+func extractAs(args []string) (as string, rest []string, err error) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return as, append(rest, args[i:]...), nil
+		case a == "--as" || a == "-as":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("--as requires a value")
+			}
+			i++
+			as = args[i]
+		case strings.HasPrefix(a, "--as="):
+			as = a[len("--as="):]
+		case strings.HasPrefix(a, "-as="):
+			as = a[len("-as="):]
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return as, rest, nil
+}
+
 func resolveNickCommon(asFlag string) (string, bool) {
 	if s := strings.TrimSpace(asFlag); s != "" {
 		return s, true
