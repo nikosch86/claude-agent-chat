@@ -383,6 +383,28 @@ func TestHookStartAlwaysInstructsMonitor(t *testing.T) {
 	}
 }
 
+func TestHookStartPrimerNamesToolSearchPrerequisite(t *testing.T) {
+	// Monitor is a deferred tool in the Claude harness: calling it before
+	// ToolSearch("select:Monitor") fails with InputValidationError, so the
+	// primer must spell out both steps. It must also ask for a visible
+	// confirmation, so a skipped listener start is self-detecting instead of
+	// surfacing later as an unanswered peer.
+	_, _ = cleanHookEnv(t)
+	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")
+
+	out, rc := captureStdout(t, func() int { return run([]string{"hook-start"}) })
+	if rc != 0 {
+		t.Fatalf("hook-start rc = %d", rc)
+	}
+	primer := parsePrimer(t, out)
+	if !strings.Contains(primer, `ToolSearch("select:Monitor")`) {
+		t.Errorf("primer must name the ToolSearch prerequisite for the deferred Monitor tool:\n%s", primer)
+	}
+	if !strings.Contains(primer, "listener is running") {
+		t.Errorf("primer must ask for a visible confirmation that the listener is running:\n%s", primer)
+	}
+}
+
 func TestHookStartFreshHasNoMissed(t *testing.T) {
 	home, _ := cleanHookEnv(t)
 	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")
