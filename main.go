@@ -34,6 +34,8 @@ func run(args []string) int {
 		return runHookStart(rest)
 	case "hook-stop":
 		return runHookStop(rest)
+	case "codex-bridge":
+		return runCodexBridge(rest)
 	case "reset":
 		return runReset(rest)
 	case "-h", "--help", "help":
@@ -55,8 +57,9 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "  listen [--as NICK]                      # stream new matching traffic to stdout")
 	fmt.Fprintln(w, "  watch [--as NICK] [--filter @nick] [--tail N] [--no-color] [--date]")
 	fmt.Fprintln(w, "  chat [--as NICK] [--tail N] [--no-color]  # interactive read/write client (pinned input)")
-	fmt.Fprintln(w, "  hook-start [--emit claude|text|json]     # SessionStart hook entry point (text/json for the kilo plugin)")
+	fmt.Fprintln(w, "  hook-start [--emit claude|text|json|codex]  # SessionStart hook entry point (text/json for kilo, codex for Codex CLI)")
 	fmt.Fprintln(w, "  hook-stop                               # SessionEnd hook entry point")
+	fmt.Fprintln(w, "  codex-bridge --thread ID [--as NICK]    # forward incoming messages into a codex session via `codex queue` (started by hook-start --emit codex)")
 	fmt.Fprintln(w, "  reset [<nick>]                          # release a nick claim (defaults to resolver-derived)")
 	fmt.Fprintln(w, "Every verb except hook-* accepts --as NICK (or --as=NICK), at any argument position.")
 }

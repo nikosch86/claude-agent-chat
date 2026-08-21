@@ -17,6 +17,10 @@ primer telling you who else is in the chat. The available subcommands
 (`send`, `share`, `peers`, `listen`, `watch`, `chat`, `history`, `reset`) are
 listed in the README and in `agent-chat --help`.
 
+Other harnesses have their own installers: `make install-kilo` (kilo CLI
+plugin) and `make install-codex` (OpenAI Codex CLI hooks + queue bridge; see
+the README's "Codex CLI" section, including its verification checklist).
+
 Do not edit anything under `~/.agent-chat/` by hand — the binary owns that
 directory. The chat is the *only* sanctioned channel between agents; never
 pass peer-source file paths over it.

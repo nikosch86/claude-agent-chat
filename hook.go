@@ -33,11 +33,13 @@ func runHookStart(args []string) int {
 	// --emit selects the output framing. "claude" (default) prints the
 	// SessionStart hook envelope Claude Code consumes; "text" prints the bare
 	// primer to stdout for harnesses (e.g. the kilo plugin) that inject it
-	// themselves. The side effects — nick claim, join record, missed scan — are
-	// identical for both.
+	// themselves; "json" returns {primer, missed, moreHint} for the kilo
+	// plugin; "codex" prints the flat {additionalContext} object Codex CLI
+	// hooks consume and spawns the queue bridge. The side effects — nick
+	// claim, join record, missed scan — are identical for all.
 	fs := flag.NewFlagSet("hook-start", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	emit := fs.String("emit", "claude", "output format: claude (hook envelope) | text (plain primer)")
+	emit := fs.String("emit", "claude", "output format: claude (hook envelope) | text (plain primer) | json (kilo) | codex")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -71,6 +73,12 @@ func runHookStart(args []string) int {
 			// key off the code, not stdout, so emit nothing.
 			if mode == "text" || mode == "json" {
 				return 3
+			}
+			if mode == "codex" {
+				// Same contract as Claude mode — rc 0 with a NOT-JOINED
+				// context — and no bridge is spawned, so the live owner's
+				// inbox is never double-consumed.
+				return emitCodexJSON(buildNotJoinedPrimer(nick))
 			}
 			return emitHookOutput(sessionStartEv, buildNotJoinedPrimer(nick))
 		}
@@ -115,9 +123,32 @@ func runHookStart(args []string) int {
 		// turn (mirrors how Claude surfaces missed mentions at session start).
 		shown, hint := missedSection(missed)
 		return emitKiloJSON(buildJoinPrimerKilo(nick, peers), shown, hint)
+	case "codex":
+		// Codex CLI view: spawn the detached bridge that forwards incoming
+		// traffic via `codex queue`, then hand the primer to the SessionStart
+		// hook as additionalContext. Without a session id there is no thread
+		// to queue into; join anyway (send/history still work) and say so.
+		if sessionID == "" {
+			fmt.Fprintln(os.Stderr, "hook-start: no session_id in hook payload — codex bridge not started; incoming messages reachable via history only")
+		} else if err := spawnCodexBridge(nick, sessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "hook-start: codex bridge not started: %v\n", err)
+		}
+		return emitCodexJSON(buildJoinPrimerCodex(nick, peers, missed))
 	default:
 		return emitPrimer(mode, sessionStartEv, buildJoinPrimer(nick, peers, missed))
 	}
+}
+
+// emitCodexJSON prints the flat control object Codex CLI hooks read from
+// stdout: additionalContext becomes model-visible session context. (Unlike
+// Claude Code there is no hookSpecificOutput envelope.)
+func emitCodexJSON(primer string) int {
+	enc := json.NewEncoder(os.Stdout)
+	if err := enc.Encode(map[string]string{"additionalContext": primer}); err != nil {
+		fmt.Fprintf(os.Stderr, "hook-start: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // kiloHookOutput is the --emit json payload consumed by the kilo plugin.
@@ -183,6 +214,7 @@ func runHookStop(args []string) int {
 				fmt.Fprintf(os.Stderr, "hook-stop: %v\n", err)
 				return 1
 			}
+			stopCodexBridge(c.nick)
 		}
 		os.Remove(c.path)
 	}
@@ -382,28 +414,7 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 	}
 	fmt.Fprintf(&b, "You are joined as `%s`. Active peers: %s.\n\n", nick, peerList)
 
-	if len(missed) > 0 {
-		fmt.Fprintf(&b, "You missed %d mention(s) while offline", len(missed))
-		shown := missed
-		if len(missed) > missedPreviewMax {
-			shown = missed[len(missed)-missedPreviewMax:]
-			// Anchor recovery on the oldest missed line's time, not --tail N:
-			// the agent has just started a listener, so new matching traffic
-			// can land before it runs this — and that would push the oldest
-			// (un-inlined) mentions out of a tail-N view, silently losing the
-			// very messages this points at. --since is exact and complete.
-			if anchor := missedSinceAnchor(missed[0]); anchor != "" {
-				fmt.Fprintf(&b, " — latest %d below; run `agent-chat history --to me --since %s` for the rest", missedPreviewMax, anchor)
-			} else {
-				fmt.Fprintf(&b, " — latest %d below; run `agent-chat history --to me --tail %d` for the rest", missedPreviewMax, len(missed))
-			}
-		}
-		b.WriteString(":\n")
-		for _, line := range shown {
-			fmt.Fprintf(&b, "  %s\n", line)
-		}
-		b.WriteByte('\n')
-	}
+	appendMissedBlock(&b, missed)
 
 	b.WriteString("Commands:\n")
 	b.WriteString("  agent-chat send @peer '...'             # plain reply (single-quote the body)\n")
@@ -418,6 +429,67 @@ func buildJoinPrimer(nick string, peers, missed []string) string {
 	b.WriteString("  - When reading the log, narrow it (`history --from @peer --tail N --format text`) rather than replaying your whole inbox.\n")
 	b.WriteString("  - Single-quote message bodies: `agent-chat send @peer 'text'`. A double-quoted body lets YOUR shell expand backticks and $(...) in it before agent-chat runs — which can silently execute a local command and drop the message with no error. Single quotes (or a heredoc) keep the body literal.\n")
 	b.WriteString("  - Questions are async: send and continue working. When a reply lands as a listen notification, respond then. If a peer doesn't answer for a long time, escalate by addressing @hoffmann.\n")
+	return b.String()
+}
+
+// appendMissedBlock writes the capped missed-mentions section shared by the
+// Claude and Codex join primers. Anchor recovery on the oldest missed line's
+// time, not --tail N: the agent's listener/bridge is already running, so new
+// matching traffic can land before it runs the recovery command — and that
+// would push the oldest (un-inlined) mentions out of a tail-N view, silently
+// losing the very messages this points at. --since is exact and complete.
+func appendMissedBlock(b *strings.Builder, missed []string) {
+	if len(missed) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "You missed %d mention(s) while offline", len(missed))
+	shown := missed
+	if len(missed) > missedPreviewMax {
+		shown = missed[len(missed)-missedPreviewMax:]
+		if anchor := missedSinceAnchor(missed[0]); anchor != "" {
+			fmt.Fprintf(b, " — latest %d below; run `agent-chat history --to me --since %s` for the rest", missedPreviewMax, anchor)
+		} else {
+			fmt.Fprintf(b, " — latest %d below; run `agent-chat history --to me --tail %d` for the rest", missedPreviewMax, len(missed))
+		}
+	}
+	b.WriteString(":\n")
+	for _, line := range shown {
+		fmt.Fprintf(b, "  %s\n", line)
+	}
+	b.WriteByte('\n')
+}
+
+// buildJoinPrimerCodex renders the join context for Codex CLI sessions, where
+// it rides in as SessionStart hook additionalContext. No listener setup is
+// asked of the agent — the detached codex-bridge delivers incoming traffic as
+// queued turns — so the primer only explains identity, commands, and rules.
+func buildJoinPrimerCodex(nick string, peers, missed []string) string {
+	var b strings.Builder
+	b.WriteString("## Agent Chat is active\n\n")
+
+	peerList := "(none)"
+	if filtered := filterOut(peers, nick); len(filtered) > 0 {
+		peerList = strings.Join(filtered, ", ")
+	}
+	fmt.Fprintf(&b, "You are joined as `%s`. Active peers: %s.\n\n", nick, peerList)
+
+	b.WriteString("Incoming messages are delivered into this session automatically as new turns prefixed \"New agent-chat message\" — there is nothing to set up, poll, or watch. Continue with your work and respond when one arrives.\n\n")
+
+	appendMissedBlock(&b, missed)
+
+	b.WriteString("Commands:\n")
+	b.WriteString("  agent-chat send @peer '...'             # plain reply (single-quote the body)\n")
+	b.WriteString("  agent-chat share @peer --file PATH      # share a file (auto-copied to artifacts)\n")
+	b.WriteString("  agent-chat peers                        # who's around\n")
+	b.WriteString("  agent-chat history --to me              # catch-up only (new msgs arrive automatically); narrow with --from @peer --tail N --format text to save context\n")
+	b.WriteString("  agent-chat --help                       # everything else\n\n")
+	b.WriteString("Rules:\n")
+	fmt.Fprintf(&b, "  - You are the authority on this repo (`%s`). Peers ask you about it.\n", nick)
+	b.WriteString("  - Do NOT read peer repos directly. If a peer's content matters, ask them or wait for them to `share` it. Any `path` you receive will live under ~/.agent-chat/artifacts/.\n")
+	b.WriteString("  - `send` has NO size limit — write the message the length it needs to be, and never shorten and resend one you already sent (it was delivered whole the first time; resending only duplicates it). A message delivered as \"too long to show here\" carries a preview plus a command to read the body in one piece — run that command. Use `share @peer --file PATH` for files, not to dodge a size limit.\n")
+	b.WriteString("  - When reading the log, narrow it (`history --from @peer --tail N --format text`) rather than replaying your whole inbox.\n")
+	b.WriteString("  - Single-quote message bodies: `agent-chat send @peer 'text'`. A double-quoted body lets YOUR shell expand backticks and $(...) in it before agent-chat runs — which can silently execute a local command and drop the message with no error. Single quotes (or a heredoc) keep the body literal.\n")
+	b.WriteString("  - Questions are async: send and continue working. A peer's reply arrives as a new turn; respond then. If a peer doesn't answer for a long time, escalate by addressing @hoffmann.\n")
 	return b.String()
 }
 

@@ -292,30 +292,32 @@ func TestIsOwnListenerIdentifiesLiveProcess(t *testing.T) {
 
 	// The child may not be fully exec'd right after Start (macOS stalls a
 	// fresh binary's first exec on code-signing validation), so poll.
-	if !waitFor(t, 2*time.Second, func() bool { return isOwnListener(cmd.Process.Pid) }) {
-		t.Errorf("isOwnListener(%d) = false for a live agent-chat listen process", cmd.Process.Pid)
+	if !waitFor(t, 2*time.Second, func() bool { return isOwnAgentChatProc(cmd.Process.Pid, "listen") }) {
+		t.Errorf("isOwnAgentChatProc(%d, listen) = false for a live agent-chat listen process", cmd.Process.Pid)
 	}
-	if isOwnListener(os.Getpid()) {
-		t.Errorf("isOwnListener(%d) = true for the test process itself", os.Getpid())
+	if isOwnAgentChatProc(os.Getpid(), "listen") {
+		t.Errorf("isOwnAgentChatProc(%d, listen) = true for the test process itself", os.Getpid())
 	}
 }
 
-// TestIsListenArgv pins the argv heuristic shared by the /proc and ps paths.
-func TestIsListenArgv(t *testing.T) {
+// TestIsAgentChatArgv pins the argv heuristic shared by the /proc and ps paths.
+func TestIsAgentChatArgv(t *testing.T) {
+	listeners := []string{"listen", "codex-bridge"}
 	cases := []struct {
 		argv []string
 		want bool
 	}{
 		{[]string{"/Users/x/.claude/agent-chat/agent-chat", "listen"}, true},
 		{[]string{"agent-chat", "listen", "--as", "alice"}, true},
-		{[]string{"agent-chat", "send", "@bob", "listen up"}, false}, // "listen" must be a bare arg, not message text
-		{[]string{"vim", "listen"}, false},                           // no binary match
-		{[]string{"agent-chat", "watch"}, false},                     // wrong verb
+		{[]string{"agent-chat", "codex-bridge", "--foreground", "--thread", "t1"}, true}, // the bridge consumes the same cursor, so takeover must evict it too
+		{[]string{"agent-chat", "send", "@bob", "listen up"}, false},                     // "listen" must be a bare arg, not message text
+		{[]string{"vim", "listen"}, false},                                               // no binary match
+		{[]string{"agent-chat", "watch"}, false},                                         // wrong verb
 		{nil, false},
 	}
 	for _, c := range cases {
-		if got := isListenArgv(c.argv); got != c.want {
-			t.Errorf("isListenArgv(%q) = %v, want %v", c.argv, got, c.want)
+		if got := isAgentChatArgv(c.argv, listeners); got != c.want {
+			t.Errorf("isAgentChatArgv(%q) = %v, want %v", c.argv, got, c.want)
 		}
 	}
 }

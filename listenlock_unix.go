@@ -89,24 +89,26 @@ func tryLockListener(nick string) func() {
 
 // requestIncumbentStepDown SIGTERMs the current lock holder so it exits cleanly
 // and releases. It only signals a pid that still looks like one of our own
-// listeners, so a recycled pid (the holder may have died between our read and
-// now) can never take out an unrelated process. A pid of 0, our own pid, or one
-// that no longer looks like a listener is a no-op: the bounded acquire loop
-// then either wins (the holder is already gone) or fails open.
+// listeners (a `listen` or a `codex-bridge`, which consumes the same cursor),
+// so a recycled pid (the holder may have died between our read and now) can
+// never take out an unrelated process. A pid of 0, our own pid, or one that no
+// longer looks like a listener is a no-op: the bounded acquire loop then
+// either wins (the holder is already gone) or fails open.
 func requestIncumbentStepDown(pid int) {
-	if pid <= 0 || pid == os.Getpid() || !isOwnListener(pid) {
+	if pid <= 0 || pid == os.Getpid() || !isOwnAgentChatProc(pid, "listen", "codex-bridge") {
 		return
 	}
 	_ = syscall.Kill(pid, syscall.SIGTERM)
 }
 
-// isOwnListener reports whether pid is one of our own `agent-chat listen`
-// processes, read from /proc/<pid>/cmdline where available (Linux), else from
-// `ps -o command=` (macOS and other no-/proc unixes). Unreadable means false.
-func isOwnListener(pid int) bool {
+// isOwnAgentChatProc reports whether pid is one of our own agent-chat
+// processes running one of the given verbs, read from /proc/<pid>/cmdline
+// where available (Linux), else from `ps -o command=` (macOS and other
+// no-/proc unixes). Unreadable means false.
+func isOwnAgentChatProc(pid int, verbs ...string) bool {
 	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
 		// argv is NUL-separated.
-		return isListenArgv(strings.Split(string(b), "\x00"))
+		return isAgentChatArgv(strings.Split(string(b), "\x00"), verbs)
 	}
 	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
@@ -115,22 +117,24 @@ func isOwnListener(pid int) bool {
 	}
 	// ps space-joins argv into one line, so fields of a spaced argument
 	// match as individual tokens here.
-	return isListenArgv(strings.Fields(string(out)))
+	return isAgentChatArgv(strings.Fields(string(out)), verbs)
 }
 
-// isListenArgv applies the listener heuristic to an argv: some argument names
-// the binary and a bare "listen" verb appears alongside it.
-func isListenArgv(argv []string) bool {
-	var sawBinary, sawListen bool
+// isAgentChatArgv applies the process heuristic to an argv: some argument
+// names the binary and one of the bare verbs appears alongside it.
+func isAgentChatArgv(argv, verbs []string) bool {
+	var sawBinary, sawVerb bool
 	for _, a := range argv {
 		if strings.Contains(a, "agent-chat") {
 			sawBinary = true
 		}
-		if a == "listen" {
-			sawListen = true
+		for _, v := range verbs {
+			if a == v {
+				sawVerb = true
+			}
 		}
 	}
-	return sawBinary && sawListen
+	return sawBinary && sawVerb
 }
 
 // recordLockHolder stamps this process's pid into the lock file so a later
