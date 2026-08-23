@@ -13,6 +13,16 @@ package main
 // The bridge holds the same per-nick listener singleton lock as `listen`, so a
 // Claude Monitor listener and a codex bridge can never double-consume one
 // nick's cursor — newest wins, exactly like two listeners.
+//
+// Lifetime: the SessionEnd hook stops the bridge on a clean exit. `codex
+// queue` accepts a thread id whether or not a session is running it (the
+// queue is durable and replayed on resume), so a bridge orphaned by an unclean
+// exit would keep swallowing messages into a dead thread. As a backstop the
+// bridge also watches the liveness signal Codex maintains itself: it holds an
+// exclusive flock on $CODEX_HOME/thread-writer-locks/<thread>.lock for as long
+// as the session owns the thread (released or deleted when the process goes
+// away). Once that lock has been seen held and is then observed free on
+// several consecutive probes, the bridge exits.
 
 import (
 	"bytes"
@@ -27,12 +37,23 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // bridgeMaxDeliverFails is how many consecutive `codex queue` failures the
 // bridge tolerates before concluding the session (or the codex binary) is gone
 // and exiting. A success resets the counter.
 var bridgeMaxDeliverFails = 5
+
+// Liveness probe of the codex thread writer lock (see the package comment).
+// The lock must be observed held at least once before its absence counts, so
+// a thread hosted elsewhere (remote app server) or a slow start never trips
+// it; after that, bridgeDeadProbes consecutive free/missing observations end
+// the bridge.
+var (
+	bridgeProbeInterval = 5 * time.Second
+	bridgeDeadProbes    = 3
+)
 
 func runCodexBridge(args []string) int {
 	as, args, err := extractAs(args)
@@ -111,6 +132,7 @@ func codexBridgeForeground(nick, thread string) int {
 	defer cancel()
 
 	fmt.Fprintf(os.Stderr, "codex-bridge: forwarding messages for @%s into codex thread %s\n", nick, thread)
+	go watchCodexThread(ctx, cancel, codexThreadLockPath(thread), bridgeProbeIntervalFromEnv(), bridgeDeadProbes, os.Stderr)
 	w := &bridgeWriter{
 		cancel: cancel,
 		deliver: func(msg string) error {
@@ -209,6 +231,74 @@ func codexQueue(ctx context.Context, thread, msg string) error {
 	}
 	return nil
 }
+
+// bridgeProbeIntervalFromEnv lets tests shorten the liveness probe interval
+// (AGENT_CHAT_CODEX_PROBE_MS); otherwise bridgeProbeInterval.
+func bridgeProbeIntervalFromEnv() time.Duration {
+	if v, err := strconv.Atoi(os.Getenv("AGENT_CHAT_CODEX_PROBE_MS")); err == nil && v > 0 {
+		return time.Duration(v) * time.Millisecond
+	}
+	return bridgeProbeInterval
+}
+
+// codexHome mirrors Codex's own resolution: $CODEX_HOME, else ~/.codex.
+func codexHome() string {
+	if v := os.Getenv("CODEX_HOME"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".codex"
+	}
+	return filepath.Join(home, ".codex")
+}
+
+func codexThreadLockPath(thread string) string {
+	return filepath.Join(codexHome(), "thread-writer-locks", thread+".lock")
+}
+
+// watchCodexThread polls the thread writer lock every interval and calls
+// cancel once the lock — previously seen held — has been free or missing for
+// deadProbes consecutive probes. Returns when ctx ends.
+func watchCodexThread(ctx context.Context, cancel context.CancelFunc, lockPath string, interval time.Duration, deadProbes int, log *os.File) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	seenHeld := false
+	dead := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		switch probeThreadLock(lockPath) {
+		case lockHeld:
+			seenHeld = true
+			dead = 0
+		case lockFree, lockMissing:
+			if !seenHeld {
+				continue
+			}
+			dead++
+			if dead >= deadProbes {
+				fmt.Fprintf(log, "codex-bridge: codex thread writer lock %s no longer held — session gone; exiting\n", lockPath)
+				cancel()
+				return
+			}
+		case lockUnknown:
+			// Cannot tell (no flock on this platform, EACCES, …): never exit on it.
+		}
+	}
+}
+
+type lockState int
+
+const (
+	lockUnknown lockState = iota
+	lockMissing
+	lockFree
+	lockHeld
+)
 
 func codexBin() string {
 	if v := os.Getenv("AGENT_CHAT_CODEX_BIN"); v != "" {

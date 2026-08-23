@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// --emit codex prints the flat {additionalContext} object Codex hooks consume
-// (no hookSpecificOutput envelope), writes a join record, and — with no
-// session id on stdin — does not attempt to spawn a bridge.
+// --emit codex prints the SessionStart envelope Codex hooks consume (the same
+// hookSpecificOutput shape as Claude Code — Codex rejects anything else),
+// writes a join record, and — with no session id on stdin — does not attempt
+// to spawn a bridge.
 func TestHookStartEmitCodexJoins(t *testing.T) {
 	home, _ := cleanHookEnv(t)
 	t.Setenv("CLAUDE_AGENT_CHAT_NICK", "alice")
@@ -65,19 +66,39 @@ func TestHookStartEmitCodexOptOut(t *testing.T) {
 	}
 }
 
-// parseCodexContext pulls additionalContext out of the flat codex hook object,
-// failing if the output carries Claude's hookSpecificOutput envelope instead.
+// parseCodexContext pulls additionalContext out of the codex hook output.
+// Codex parses SessionStart output with unknown fields rejected, so the only
+// accepted shape is {hookSpecificOutput:{hookEventName:"SessionStart",
+// additionalContext}} — a top-level additionalContext (or any other stray
+// key) makes Codex report "invalid session start JSON output" and drop the
+// primer.
 func parseCodexContext(t *testing.T, out string) string {
 	t.Helper()
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(out), &m); err != nil {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &top); err != nil {
 		t.Fatalf("hook output is not JSON: %v\n%s", err, out)
 	}
-	if _, ok := m["hookSpecificOutput"]; ok {
-		t.Fatalf("codex mode must not emit the Claude envelope:\n%s", out)
+	for k := range top {
+		switch k {
+		case "hookSpecificOutput", "continue", "stopReason", "suppressOutput", "systemMessage":
+		default:
+			t.Fatalf("codex rejects unknown top-level key %q in SessionStart output:\n%s", k, out)
+		}
 	}
-	var ctx string
-	if err := json.Unmarshal(m["additionalContext"], &ctx); err != nil {
+	var inner map[string]json.RawMessage
+	if err := json.Unmarshal(top["hookSpecificOutput"], &inner); err != nil {
+		t.Fatalf("no hookSpecificOutput object in codex hook output: %v\n%s", err, out)
+	}
+	for k := range inner {
+		if k != "hookEventName" && k != "additionalContext" {
+			t.Fatalf("codex rejects unknown hookSpecificOutput key %q:\n%s", k, out)
+		}
+	}
+	var ev, ctx string
+	if err := json.Unmarshal(inner["hookEventName"], &ev); err != nil || ev != "SessionStart" {
+		t.Fatalf("hookEventName = %s, want \"SessionStart\"", inner["hookEventName"])
+	}
+	if err := json.Unmarshal(inner["additionalContext"], &ctx); err != nil {
 		t.Fatalf("no additionalContext string in codex hook output: %v\n%s", err, out)
 	}
 	return ctx

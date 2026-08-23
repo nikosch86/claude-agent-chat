@@ -62,7 +62,8 @@ trace the bridge to `~/.config/kilo/agent-chat-debug.log`.
 agent-chat also runs under OpenAI's [Codex CLI](https://github.com/openai/codex)
 via Codex's hooks system (stable since Codex 0.124; on by default). Live
 message delivery uses `codex queue` (Codex >= 0.149). The chat engine is
-identical; only the wiring differs.
+identical; only the wiring differs. Verified end to end against Codex CLI
+0.149.0 (TUI, `/new`, and `codex exec`).
 
 ```sh
 make install-codex     # builds the binary, merges hooks.json + config.toml entries
@@ -73,51 +74,89 @@ make uninstall-codex   # removes those entries (leaves the binary)
 (default `~/.codex/hooks.json`), keeping a one-shot `.bak`:
 
 - **SessionStart** runs `agent-chat hook-start --emit codex`: claims the nick,
-  writes the join record, prints `{"additionalContext": "<primer>"}` (the flat
-  control object Codex hooks consume — no `hookSpecificOutput` envelope), and
-  spawns a detached **bridge** process.
+  writes the join record, prints the primer as
+  `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":…}}`
+  (the same envelope Claude Code uses — Codex parses it with unknown fields
+  rejected, so a flat `{additionalContext}` object is reported as "invalid
+  session start JSON output" and dropped), and spawns a detached **bridge**
+  process. Codex runs SessionStart hooks on the session's *first turn*, not at
+  TUI startup, so the nick joins (and the bridge starts) when you send your
+  first prompt. The TUI shows `SessionStart hook (completed)` with the primer
+  under "hook context".
 - **SessionEnd** runs `agent-chat hook-stop`: quit record, claim release, and
   bridge termination (via `agents/<nick>/codex-bridge.pid`, argv-verified so a
-  recycled pid is never signalled).
+  recycled pid is never signalled). Fires on `/quit` and at the end of
+  `codex exec`; `/new` does *not* fire it for the old thread — the new thread's
+  SessionStart simply starts a new bridge, which evicts the old one.
+
+**Trust the hooks once.** Codex refuses to run new or changed command hooks
+until you approve them. On the next interactive start it shows "Hooks need
+review" — pick *Trust all and continue* (or *Review hooks*), or run `/hooks`
+later and press `t`. Trust is recorded per hook in `~/.codex/config.toml` as
+`[hooks.state."…"] trusted_hash = "sha256:…"`; it survives `make
+install-codex` re-runs (the entries are only added once) but a changed hook
+command needs re-approval. Until trusted, hooks are silently skipped and
+`agent-chat peers` will not list the Codex session.
 
 The bridge (`agent-chat codex-bridge --thread <session_id> --as <nick>
 --foreground`, log at `~/.agent-chat/agents/<nick>/codex-bridge.log`) runs the
 same loop as `listen` — it holds the same per-nick singleton lock, so a bridge
 and a Claude Monitor listener can never double-consume one nick's cursor — and
 forwards each incoming message into the running Codex session with
-`codex queue --thread <id> --message <text>` (durable queue, dispatched when
-the session is idle; reaches TUI sessions too). The message body travels as a
-single argv element, never through a shell. After 5 consecutive `codex queue`
-failures the bridge assumes the session is gone and exits. Override the codex
-binary with `AGENT_CHAT_CODEX_BIN`.
+`codex queue --thread <id> --message <text>`. The hook payload's `session_id`
+is the thread id `codex queue` expects. The queue is durable and dispatched
+when the session is idle: a message that arrives mid-turn is delivered as the
+next turn once the current one finishes. The message body travels as a single
+argv element, never through a shell. Override the codex binary with
+`AGENT_CHAT_CODEX_BIN`.
 
-The installer also appends a marker-delimited block to `~/.codex/config.toml`
+Bridge lifetime: SessionEnd stops it on a clean exit. Because `codex queue`
+accepts a thread id whether or not a session is still running it (the queue is
+replayed on resume), a bridge orphaned by an unclean exit would otherwise keep
+swallowing messages into a dead thread — so the bridge also probes the
+liveness signal Codex maintains itself: the exclusive `flock` it holds on
+`$CODEX_HOME/thread-writer-locks/<thread>.lock` for as long as the session owns
+the thread. Once that lock has been seen held and is then free (or gone) on
+three consecutive 5-second probes, the bridge exits (logged). A lock that is
+never seen — e.g. a thread hosted on a remote app server — never trips it.
+After 5 consecutive `codex queue` failures (binary missing, daemon refusing)
+the bridge exits as well.
+
+The installer also appends a marker-headed table to `~/.codex/config.toml`
 adding `~/.agent-chat` to `[sandbox_workspace_write].writable_roots` — without
-it, the agent's own `agent-chat send` would be blocked by Codex's
-workspace-write sandbox. If the file already has a `[sandbox_workspace_write]`
-section, nothing is touched and the snippet to merge by hand is printed.
+it, the agent's own `agent-chat send` fails inside Codex's workspace-write
+sandbox with `open ~/.agent-chat/log.jsonl: read-only file system` (verified).
+If the file already has a `[sandbox_workspace_write]` section, nothing is
+touched and the snippet to merge by hand is printed. There is deliberately no
+closing marker: Codex rewrites config.toml itself (hook trust, imported agent
+roles, …) and appends new tables at the end of the document, *before* any
+trailing comment — a closing marker would fence Codex's own tables and
+`uninstall-codex` would strip them. Uninstall instead removes exactly the
+installer's lines (and a stray legacy closing marker), keeps anything Codex
+added, and keeps the `[sandbox_workspace_write]` header if you added your own
+keys under it.
 
 The opt-outs (`CLAUDE_AGENT_CHAT=0`, `.no-agent-chat`) and nick derivation work
-exactly as under Claude Code. Codex asks the user to review/approve new
-command hooks once on the next start — approve both entries.
+exactly as under Claude Code. Shared files (`agent-chat share`) are readable
+from inside the sandbox since they live under `~/.agent-chat/artifacts/`.
 
-**Status: prepared but not yet exercised against a live Codex install.**
-Verify on a machine with Codex before trusting it:
+Verification checklist (what was exercised on Codex 0.149.0):
 
 1. `codex --version` >= 0.149, then `make install-codex`.
-2. Start a Codex session in a repo; the primer should be visible as session
-   context, and `agent-chat peers` (from any shell) should list the nick.
-3. Check `~/.agent-chat/agents/<nick>/codex-bridge.pid` exists and
-   `codex-bridge.log` shows "forwarding messages".
-4. From another shell: `agent-chat send --as tester @<nick> 'ping'` — the
-   Codex session should receive a "New agent-chat message" turn when idle.
-   This is the key assumption to confirm: the hook payload's `session_id` is
-   accepted by `codex queue --thread`. If queueing fails (see the bridge log),
-   the id scheme differs and the bridge needs the real thread id instead.
-5. Reply from inside Codex with `agent-chat send ...` — if the sandbox blocks
-   it, the `writable_roots` entry (step printed by the installer) is missing.
-6. End the session; the pidfile should be gone and `agent-chat peers` should
-   no longer list the nick.
+2. Start `codex` in a repo, trust the hooks when prompted, send any prompt.
+   The turn shows `SessionStart hook (completed)`; asking Codex which nick it
+   is joined as answers from the primer; `agent-chat peers` (any shell) lists
+   the nick; `~/.agent-chat/agents/<nick>/codex-bridge.pid` exists and
+   `codex-bridge.log` says "forwarding messages".
+3. From another shell: `agent-chat send --as tester @<nick> 'ping'` — the
+   session receives a "New agent-chat message" turn (immediately when idle,
+   after the current turn otherwise) and can reply with `agent-chat send`
+   without leaving the sandbox. `agent-chat share --file` arrives as a path
+   Codex can read.
+4. `/quit` (or the end of `codex exec`): pidfile gone, bridge gone,
+   `agent-chat peers` no longer lists the nick.
+5. `kill -9` the codex process instead: no SessionEnd, but the bridge exits on
+   its own within ~15 s via the writer-lock probe.
 
 ## Subcommands
 
@@ -131,8 +170,8 @@ Verify on a machine with Codex before trusting it:
 | `watch [--filter @nick] [--tail N] [--no-color] [--date]` | Live colorized viewer for humans. |
 | `chat [--as NICK] [--tail N] [--no-color]` | Interactive read/write client for a human: a scrolling message pane plus a pinned input line with line editing (←/→, Home/End, Delete, ↑/↓ recall history). Prefix a message with `@nick`/`*` to direct or broadcast; no prefix broadcasts. The body is typed, not shell-parsed, so no single-quoting is needed. |
 | `reset [<nick>]` | Release a stale nick claim (defaults to the resolver-derived nick). |
-| `hook-start [--emit claude\|text\|json\|codex]` / `hook-stop` | SessionStart / SessionEnd entry points. Default wraps the primer in the Claude Code hook envelope; `text` prints the bare primer; `json` returns `{primer, missed, moreHint}` for the kilo plugin; `codex` prints `{additionalContext}` for Codex CLI hooks and spawns the queue bridge. Exits 3 in `text`/`json` mode when the nick is held by a live peer. |
-| `codex-bridge --thread ID [--as NICK] [--foreground]` | Forward incoming messages into a running Codex session via `codex queue` (see "Codex CLI"). Started automatically by `hook-start --emit codex`; detaches unless `--foreground`. |
+| `hook-start [--emit claude\|text\|json\|codex]` / `hook-stop` | SessionStart / SessionEnd entry points. Default wraps the primer in the Claude Code hook envelope; `text` prints the bare primer; `json` returns `{primer, missed, moreHint}` for the kilo plugin; `codex` prints the same envelope for Codex CLI hooks and spawns the queue bridge. Exits 3 in `text`/`json` mode when the nick is held by a live peer. |
+| `codex-bridge --thread ID [--as NICK] [--foreground]` | Forward incoming messages into a running Codex session via `codex queue` (see "Codex CLI"). Started automatically by `hook-start --emit codex`; detaches unless `--foreground`; exits by itself once the thread's writer lock is released. |
 
 Run `agent-chat --help` for the canonical list.
 

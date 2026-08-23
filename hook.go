@@ -34,8 +34,8 @@ func runHookStart(args []string) int {
 	// SessionStart hook envelope Claude Code consumes; "text" prints the bare
 	// primer to stdout for harnesses (e.g. the kilo plugin) that inject it
 	// themselves; "json" returns {primer, missed, moreHint} for the kilo
-	// plugin; "codex" prints the flat {additionalContext} object Codex CLI
-	// hooks consume and spawns the queue bridge. The side effects — nick
+	// plugin; "codex" prints the SessionStart envelope Codex CLI hooks consume
+	// (same shape as Claude's) and spawns the queue bridge. The side effects — nick
 	// claim, join record, missed scan — are identical for all.
 	fs := flag.NewFlagSet("hook-start", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -139,16 +139,14 @@ func runHookStart(args []string) int {
 	}
 }
 
-// emitCodexJSON prints the flat control object Codex CLI hooks read from
-// stdout: additionalContext becomes model-visible session context. (Unlike
-// Claude Code there is no hookSpecificOutput envelope.)
+// emitCodexJSON prints the SessionStart control object Codex CLI hooks read
+// from stdout. Codex uses the same {hookSpecificOutput:{hookEventName,
+// additionalContext}} envelope as Claude Code and parses it with unknown
+// fields rejected — a flat {additionalContext} object is reported as "hook
+// returned invalid session start JSON output" and dropped (verified against
+// Codex CLI 0.149).
 func emitCodexJSON(primer string) int {
-	enc := json.NewEncoder(os.Stdout)
-	if err := enc.Encode(map[string]string{"additionalContext": primer}); err != nil {
-		fmt.Fprintf(os.Stderr, "hook-start: %v\n", err)
-		return 1
-	}
-	return 0
+	return emitHookOutput(sessionStartEv, primer)
 }
 
 // kiloHookOutput is the --emit json payload consumed by the kilo plugin.

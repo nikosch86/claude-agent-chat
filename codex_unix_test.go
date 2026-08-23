@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -162,6 +163,153 @@ func readPidfile(t *testing.T, path string) int {
 
 func readBridgeLog(t *testing.T, home string) string {
 	t.Helper()
-	b, _ := os.ReadFile(filepath.Join(home, "agents", "alice", "codex-bridge.log"))
+	return readBridgeLogFor(t, home, "alice")
+}
+
+func readBridgeLogFor(t *testing.T, home, nick string) string {
+	t.Helper()
+	b, _ := os.ReadFile(filepath.Join(home, "agents", nick, "codex-bridge.log"))
 	return string(b)
+}
+
+// holdFlock takes Codex's role: it creates the thread writer lock file and
+// holds an exclusive flock on it until the returned release func is called.
+func holdFlock(t *testing.T, path string) (release func()) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }
+}
+
+func TestProbeThreadLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "thread-writer-locks", "t.lock")
+	if got := probeThreadLock(path); got != lockMissing {
+		t.Errorf("missing file: got %v, want lockMissing", got)
+	}
+	release := holdFlock(t, path)
+	if got := probeThreadLock(path); got != lockHeld {
+		t.Errorf("held lock: got %v, want lockHeld", got)
+	}
+	release()
+	if got := probeThreadLock(path); got != lockFree {
+		t.Errorf("released lock: got %v, want lockFree", got)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("probe must not remove the lock file: %v", err)
+	}
+}
+
+// The watcher ends the bridge only after the lock was seen held and then
+// observed free for deadProbes consecutive probes; a lock that never appears
+// (remote thread, slow start) never trips it.
+func TestWatchCodexThreadExitsWhenLockReleased(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "thread-writer-locks", "t.lock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log, _ := os.CreateTemp(t.TempDir(), "log")
+	defer log.Close()
+
+	done := make(chan struct{})
+	go func() {
+		watchCodexThread(ctx, cancel, path, 10*time.Millisecond, 3, log)
+		close(done)
+	}()
+
+	// Never held: stays alive through many probes.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("watcher exited although the lock was never seen held")
+	default:
+	}
+
+	release := holdFlock(t, path)
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("watcher exited while the lock was held")
+	default:
+	}
+
+	release()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not exit after the lock was released")
+	}
+	if ctx.Err() == nil {
+		t.Error("watcher must cancel the bridge context")
+	}
+	b, _ := os.ReadFile(log.Name())
+	if !strings.Contains(string(b), "no longer held") {
+		t.Errorf("watcher should log why it exited, got: %q", b)
+	}
+}
+
+// A lock deleted outright (Codex removes it on thread close) counts as gone too.
+func TestWatchCodexThreadExitsWhenLockDeleted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "thread-writer-locks", "t.lock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := holdFlock(t, path)
+	done := make(chan struct{})
+	go func() {
+		watchCodexThread(ctx, cancel, path, 10*time.Millisecond, 3, os.Stderr)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	release()
+	os.Remove(path)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not exit after the lock file was deleted")
+	}
+}
+
+// End to end: a bridge whose codex thread dies uncleanly (no SessionEnd hook)
+// exits on its own via the writer-lock probe and leaves no pidfile behind.
+func TestCodexBridgeExitsWhenThreadDies(t *testing.T) {
+	home := withTempHome(t)
+	codexHome := t.TempDir()
+	lock := filepath.Join(codexHome, "thread-writer-locks", "thread-dead.lock")
+	release := holdFlock(t, lock)
+
+	env := append(os.Environ(),
+		"AGENT_CHAT_HOME="+home,
+		"CODEX_HOME="+codexHome,
+		"AGENT_CHAT_CODEX_BIN="+fakeCodex(t, filepath.Join(t.TempDir(), "calls")),
+		"AGENT_CHAT_CODEX_PROBE_MS=20",
+	)
+	bridge := exec.Command(builtBinary, "codex-bridge", "--thread", "thread-dead", "--as", "carol")
+	bridge.Env = env
+	if out, err := bridge.CombinedOutput(); err != nil {
+		t.Fatalf("codex-bridge: %v\n%s", err, out)
+	}
+	pidPath := filepath.Join(home, "agents", "carol", "codex-bridge.pid")
+	if !waitFor(t, 5*time.Second, func() bool { _, err := os.ReadFile(pidPath); return err == nil }) {
+		t.Fatalf("bridge pidfile never appeared; log:\n%s", readBridgeLogFor(t, home, "carol"))
+	}
+	pid := readPidfile(t, pidPath)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	time.Sleep(200 * time.Millisecond) // several held probes
+	if syscall.Kill(pid, syscall.Signal(0)) != nil {
+		t.Fatalf("bridge died while the thread lock was held; log:\n%s", readBridgeLogFor(t, home, "carol"))
+	}
+	release() // codex dies without running SessionEnd
+	if !waitFor(t, 5*time.Second, func() bool { return syscall.Kill(pid, syscall.Signal(0)) != nil }) {
+		t.Fatalf("bridge outlived its codex thread; log:\n%s", readBridgeLogFor(t, home, "carol"))
+	}
+	if !waitFor(t, 2*time.Second, func() bool { _, err := os.Stat(pidPath); return os.IsNotExist(err) }) {
+		t.Errorf("pidfile still present after the bridge exited on its own")
+	}
 }

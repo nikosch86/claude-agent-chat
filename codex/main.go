@@ -5,10 +5,10 @@
 // Idempotent, and keeps a one-shot .bak of each pre-install file.
 //
 // hooks.json uses Codex's Claude-compatible hooks schema (stable since Codex
-// CLI 0.124). The config.toml edit is marker-delimited and only appended when
-// the file has no [sandbox_workspace_write] section of its own; otherwise the
-// snippet is printed for the user to merge by hand — this installer never
-// rewrites TOML it does not own.
+// CLI 0.124). The config.toml edit is a marker-headed table that is only
+// appended when the file has no [sandbox_workspace_write] section of its own;
+// otherwise the snippet is printed for the user to merge by hand — this
+// installer never rewrites TOML it does not own.
 package main
 
 import (
@@ -24,7 +24,11 @@ const binaryRelPath = ".claude/agent-chat/agent-chat"
 
 const (
 	tomlMarkerBegin = "# >>> agent-chat >>>"
-	tomlMarkerEnd   = "# <<< agent-chat <<<"
+	// tomlMarkerEnd is no longer written (see tomlBlock) but is still removed
+	// on uninstall so installs made by older versions clean up fully.
+	tomlMarkerEnd = "# <<< agent-chat <<<"
+
+	tomlSectionHeader = "[sandbox_workspace_write]"
 )
 
 func main() {
@@ -108,8 +112,9 @@ func main() {
 
 	fmt.Println("\nDone. Notes:")
 	fmt.Println("  - Requires Codex CLI >= 0.124 (hooks); live message delivery needs >= 0.149 (`codex queue`).")
-	fmt.Println("  - Codex asks you to review/approve new command hooks once on next start — approve both.")
-	fmt.Println("  - Restart any open Codex sessions; the wiring takes effect on the next session.")
+	fmt.Println("  - Codex runs no new hook until you trust it: on the next interactive start pick")
+	fmt.Println("    \"Trust all and continue\" at the \"Hooks need review\" prompt (or /hooks, then t).")
+	fmt.Println("  - Restart any open Codex sessions; the wiring takes effect on the next session's first turn.")
 }
 
 func die(format string, args ...any) {
@@ -253,15 +258,20 @@ const (
 	tomlManual
 )
 
-// tomlBlock renders the marker-delimited section appended to config.toml.
+// tomlBlock renders the marker-headed table appended to config.toml. There is
+// deliberately no closing marker: Codex rewrites config.toml itself (e.g. it
+// persists hook trust as [hooks.state."…"] tables) and appends new tables at
+// the end of the document *before* any trailing comment — so a closing
+// marker would end up fencing Codex's own tables and uninstall would strip
+// them. Instead the block is exactly these lines, and removeTomlBlock matches
+// them line by line.
 func tomlBlock(chatHome string) string {
 	return fmt.Sprintf(`%s
 # Allow agent-chat to write its home from inside the Codex sandbox.
-# Managed by the agent-chat installer; do not edit between the markers.
-[sandbox_workspace_write]
-writable_roots = [%q]
+# Managed by the agent-chat installer; `+"`make uninstall-codex`"+` removes these lines.
 %s
-`, tomlMarkerBegin, chatHome, tomlMarkerEnd)
+writable_roots = [%q]
+`, tomlMarkerBegin, tomlSectionHeader, chatHome)
 }
 
 // addTomlBlock appends the writable-roots block to config.toml. It refuses to
@@ -277,7 +287,7 @@ func addTomlBlock(path, chatHome string) (tomlResult, error) {
 	if strings.Contains(s, tomlMarkerBegin) {
 		return tomlPresent, nil
 	}
-	if strings.Contains(s, "[sandbox_workspace_write]") {
+	if strings.Contains(s, tomlSectionHeader) {
 		return tomlManual, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -289,7 +299,10 @@ func addTomlBlock(path, chatHome string) (tomlResult, error) {
 	if len(s) > 0 && !strings.HasSuffix(s, "\n") {
 		s += "\n"
 	}
-	s += "\n" + tomlBlock(chatHome)
+	if len(s) > 0 {
+		s += "\n"
+	}
+	s += tomlBlock(chatHome)
 	if err := os.WriteFile(path, []byte(s), 0o644); err != nil {
 		return tomlManual, err
 	}
@@ -298,6 +311,13 @@ func addTomlBlock(path, chatHome string) (tomlResult, error) {
 
 // removeTomlBlock deletes the marker-delimited block, leaving the rest of
 // config.toml byte-identical.
+// removeTomlBlock deletes the lines the installer wrote: the begin marker,
+// its comment lines, the [sandbox_workspace_write] header and the
+// writable_roots line. Anything Codex or the user added after them stays. If
+// foreign keys were added under our header, the header is kept (removing it
+// would re-parent those keys into the previous table) and only our own lines
+// go; the caller is told so it can print a note. A stray legacy end marker is
+// removed wherever it sits. Returns whether anything was removed.
 func removeTomlBlock(path string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -307,28 +327,77 @@ func removeTomlBlock(path string) (bool, error) {
 		return false, err
 	}
 	s := string(data)
-	begin := strings.Index(s, tomlMarkerBegin)
-	if begin < 0 {
+	if !strings.Contains(s, tomlMarkerBegin) && !strings.Contains(s, tomlMarkerEnd) {
 		return false, nil
 	}
-	end := strings.Index(s, tomlMarkerEnd)
-	if end < 0 {
-		return false, fmt.Errorf("found %q but no closing %q — remove the block by hand", tomlMarkerBegin, tomlMarkerEnd)
+	lines := strings.Split(s, "\n")
+	keep := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		switch {
+		case line == tomlMarkerEnd:
+			continue
+		case line != tomlMarkerBegin:
+			keep = append(keep, lines[i])
+			continue
+		}
+		// Begin marker: drop it and the comment lines that belong to it.
+		for i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "#") {
+			i++
+		}
+		if i+1 < len(lines) && strings.TrimSpace(lines[i+1]) == tomlSectionHeader {
+			hdr := i + 1
+			// Find our writable_roots line and check for foreign keys in the table.
+			end := hdr + 1
+			foreign := false
+			ours := -1
+			for end < len(lines) {
+				t := strings.TrimSpace(lines[end])
+				if strings.HasPrefix(t, "[") {
+					break
+				}
+				if strings.HasPrefix(t, "writable_roots") && ours < 0 {
+					ours = end
+				} else if t != "" && !strings.HasPrefix(t, "#") {
+					foreign = true
+				}
+				end++
+			}
+			if !foreign {
+				i = end - 1 // drop header through the end of the table
+				// Drop the blank line(s) left between the previous content and the next table.
+				for len(keep) > 0 && strings.TrimSpace(keep[len(keep)-1]) == "" {
+					keep = keep[:len(keep)-1]
+				}
+				if end < len(lines) {
+					keep = append(keep, "")
+				}
+				continue
+			}
+			// Foreign keys under our header: keep the header and everything else, drop only writable_roots.
+			for len(keep) > 0 && strings.TrimSpace(keep[len(keep)-1]) == "" {
+				keep = keep[:len(keep)-1]
+			}
+			if len(keep) > 0 {
+				keep = append(keep, "")
+			}
+			for j := hdr; j < end; j++ {
+				if j != ours {
+					keep = append(keep, lines[j])
+				}
+			}
+			i = end - 1
+			continue
+		}
 	}
-	end += len(tomlMarkerEnd)
-	for end < len(s) && s[end] == '\n' {
-		end++
-	}
-	// Also swallow the blank line the installer added before the block.
-	for begin > 0 && s[begin-1] == '\n' {
-		begin--
-	}
-	out := s[:begin]
-	if len(out) > 0 && !strings.HasSuffix(out, "\n") {
+	out := strings.Join(keep, "\n")
+	// Normalise the tail: a single trailing newline when there is content.
+	out = strings.TrimRight(out, "\n")
+	if out != "" {
 		out += "\n"
 	}
-	if rest := s[end:]; len(rest) > 0 {
-		out += rest
+	if out == s {
+		return false, nil
 	}
 	return true, os.WriteFile(path, []byte(out), 0o644)
 }

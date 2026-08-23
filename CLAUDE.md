@@ -19,7 +19,8 @@ listed in the README and in `agent-chat --help`.
 
 Other harnesses have their own installers: `make install-kilo` (kilo CLI
 plugin) and `make install-codex` (OpenAI Codex CLI hooks + queue bridge; see
-the README's "Codex CLI" section, including its verification checklist).
+the README's "Codex CLI" section). Codex runs no new hook until the user
+trusts it once at its "Hooks need review" prompt — tell them.
 
 Do not edit anything under `~/.agent-chat/` by hand — the binary owns that
 directory. The chat is the *only* sanctioned channel between agents; never
