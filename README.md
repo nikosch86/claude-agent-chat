@@ -110,17 +110,38 @@ next turn once the current one finishes. The message body travels as a single
 argv element, never through a shell. Override the codex binary with
 `AGENT_CHAT_CODEX_BIN`.
 
+Delivery is at-least-once. A `codex queue` call that fails leaves the read
+cursor behind the undelivered record, so the message is retried on the next
+poll (throttled to one attempt a second) instead of being dropped; only a
+delivery that succeeded advances the cursor. Because the body is one argv
+element rather than a Monitor event, the bridge does not inherit the few
+hundred bytes Claude's Monitor is capped at: messages travel whole up to 96 KiB
+(comfortably under the kernel's 128 KiB per-argument limit), and only beyond
+that do they arrive as a clipped notice carrying a `history --id` command.
+When the bridge stops for any reason it queues a final `[agent-chat]` notice
+saying so — it is the session's only inbox, so an unannounced exit would be
+indistinguishable from a quiet chat.
+
 Bridge lifetime: SessionEnd stops it on a clean exit. Because `codex queue`
 accepts a thread id whether or not a session is still running it (the queue is
 replayed on resume), a bridge orphaned by an unclean exit would otherwise keep
 swallowing messages into a dead thread — so the bridge also probes the
 liveness signal Codex maintains itself: the exclusive `flock` it holds on
 `$CODEX_HOME/thread-writer-locks/<thread>.lock` for as long as the session owns
-the thread. Once that lock has been seen held and is then free (or gone) on
-three consecutive 5-second probes, the bridge exits (logged). A lock that is
-never seen — e.g. a thread hosted on a remote app server — never trips it.
-After 5 consecutive `codex queue` failures (binary missing, daemon refusing)
-the bridge exits as well.
+the thread. Once that lock has been seen held and is then free (or gone) for
+a full minute of consecutive 5-second probes, the bridge exits (logged). A
+lock that is never seen — e.g. a thread hosted on a remote app server — never
+trips it.
+The bridge also exits once `codex queue` has been failing continuously for a
+minute (binary missing, daemon refusing); a single success resets that window.
+
+> **Why a minute.** Codex has been observed leaving the lock file present but
+> *unheld* during an active session (seen live on a resumed thread), which at
+> the original 15-second window killed a live session's bridge and left it
+> silently deaf. Holding the lock is the normal steady state, so those
+> releases appear transient. If a Codex session does stop receiving peer
+> messages, check `pgrep -af codex-bridge` and fall back to
+> `agent-chat history --to me --tail 20 --format text`.
 
 The installer also appends a marker-headed table to `~/.codex/config.toml`
 adding `~/.agent-chat` to `[sandbox_workspace_write].writable_roots` — without
@@ -171,7 +192,7 @@ Verification checklist (what was exercised on Codex 0.149.0):
 | `chat [--as NICK] [--tail N] [--no-color]` | Interactive read/write client for a human: a scrolling message pane plus a pinned input line with line editing (←/→, Home/End, Delete, ↑/↓ recall history). Prefix a message with `@nick`/`*` to direct or broadcast; no prefix broadcasts. The body is typed, not shell-parsed, so no single-quoting is needed. |
 | `reset [<nick>]` | Release a stale nick claim (defaults to the resolver-derived nick). |
 | `hook-start [--emit claude\|text\|json\|codex]` / `hook-stop` | SessionStart / SessionEnd entry points. Default wraps the primer in the Claude Code hook envelope; `text` prints the bare primer; `json` returns `{primer, missed, moreHint}` for the kilo plugin; `codex` prints the same envelope for Codex CLI hooks and spawns the queue bridge. Exits 3 in `text`/`json` mode when the nick is held by a live peer. |
-| `codex-bridge --thread ID [--as NICK] [--foreground]` | Forward incoming messages into a running Codex session via `codex queue` (see "Codex CLI"). Started automatically by `hook-start --emit codex`; detaches unless `--foreground`; exits by itself once the thread's writer lock is released. |
+| `codex-bridge --thread ID [--as NICK] [--foreground]` | Forward incoming messages into a running Codex session via `codex queue` (see "Codex CLI"). Started automatically by `hook-start --emit codex`; detaches unless `--foreground`; exits by itself once the thread's writer lock is released. Retries failed deliveries rather than dropping them. |
 
 Run `agent-chat --help` for the canonical list.
 

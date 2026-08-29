@@ -70,7 +70,26 @@ func runListen(args []string) int {
 	return listenLoop(ctx, nick, os.Stdout)
 }
 
+// listenOpts carries the parts of the loop that differ per consumer: how a
+// matching log line is framed for delivery, and what is said on the way out.
+// Claude reads events through Monitor (small cap, Monitor-specific farewell);
+// the codex bridge queues them into a session (large cap, its own farewell).
+type listenOpts struct {
+	format   func([]byte, Record) []byte
+	farewell string
+}
+
+// claudeListenOpts is the Monitor framing — the historical behaviour, and what
+// bare listenLoop still does.
+func claudeListenOpts() listenOpts {
+	return listenOpts{format: notifyLine, farewell: listenFarewell}
+}
+
 func listenLoop(ctx context.Context, nick string, out io.Writer) int {
+	return listenLoopOpts(ctx, nick, out, claudeListenOpts())
+}
+
+func listenLoopOpts(ctx context.Context, nick string, out io.Writer, opts listenOpts) int {
 	me := "@" + nick
 	cursor, ok := readCursor(nick)
 	if !ok {
@@ -81,7 +100,7 @@ func listenLoop(ctx context.Context, nick string, out io.Writer) int {
 	}
 
 	touchListenerHeartbeat(nick)
-	cursor = drainListen(cursor, me, nick, out)
+	cursor = drainListen(cursor, me, nick, out, opts.format)
 
 	pollTicker := time.NewTicker(listenPollInterval)
 	defer pollTicker.Stop()
@@ -91,22 +110,28 @@ func listenLoop(ctx context.Context, nick string, out io.Writer) int {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(out, listenFarewell)
+			fmt.Fprintln(out, opts.farewell)
 			return 0
 		case <-hbTicker.C:
 			touchListenerHeartbeat(nick)
 		case <-pollTicker.C:
-			cursor = drainListen(cursor, me, nick, out)
+			cursor = drainListen(cursor, me, nick, out, opts.format)
 		}
 	}
 }
 
 // drainListen reads from `cursor` to EOF, emitting matching lines (direct to
-// @nick or broadcast "*") as raw JSON to `out`. The persistent cursor is
-// advanced past every line scanned — matching or not — so non-matching
-// traffic isn't rescanned on the next poll, and a crash loses at most one
-// in-flight emit (the one that was being written when we died).
-func drainListen(cursor int64, me, nick string, out io.Writer) int64 {
+// @nick or broadcast "*") as raw JSON to `out`, framed by `format`. The
+// persistent cursor is advanced past every line scanned — matching or not —
+// so non-matching traffic isn't rescanned on the next poll, and a crash loses
+// at most one in-flight emit (the one that was being written when we died).
+//
+// A write that reports an error stops the drain with the cursor still behind
+// the offending record, so the next poll retries it rather than losing it.
+// os.Stdout never errors in practice, so this is inert for the Claude path;
+// it is what keeps the codex bridge from dropping a message whose `codex
+// queue` call failed.
+func drainListen(cursor int64, me, nick string, out io.Writer, format func([]byte, Record) []byte) int64 {
 	f, err := os.Open(logPath())
 	if err != nil {
 		return cursor
@@ -128,15 +153,22 @@ func drainListen(cursor int64, me, nick string, out io.Writer) int64 {
 	startCursor := cursor
 	for s.Scan() {
 		line := append([]byte(nil), s.Bytes()...)
-		cursor += int64(len(line)) + 1
+		next := cursor + int64(len(line)) + 1
 		var r Record
 		if err := json.Unmarshal(line, &r); err != nil {
+			cursor = next
 			continue
 		}
 		if r.To != me && r.To != "*" {
+			cursor = next
 			continue
 		}
-		out.Write(append(notifyLine(line, r), '\n'))
+		if _, err := out.Write(append(format(line, r), '\n')); err != nil {
+			// Undelivered: leave the cursor before this record and stop, so
+			// this line and everything after it are re-read next poll.
+			break
+		}
+		cursor = next
 		_ = writeCursor(nick, cursor)
 	}
 	// Persist once at the end so non-matching traffic isn't rescanned next

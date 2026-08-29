@@ -12,7 +12,17 @@ package main
 //
 // The bridge holds the same per-nick listener singleton lock as `listen`, so a
 // Claude Monitor listener and a codex bridge can never double-consume one
-// nick's cursor — newest wins, exactly like two listeners.
+// nick's cursor — newest wins, exactly like two listeners. When it does lose
+// the lock (or exits for any other reason) it forwards the listen loop's
+// farewell into the session first: the bridge is that session's only inbox, so
+// an unannounced exit is indistinguishable from a quiet chat.
+//
+// Delivery is at-least-once, not fire-and-forget. A failed `codex queue` is
+// reported back to drainListen, which holds the read cursor behind the
+// undelivered record and re-offers it on the next poll; only a delivery that
+// succeeded advances the cursor. Retries are throttled to bridgeRetryInterval,
+// and the bridge gives up (assuming the session is gone) once delivery has
+// been broken for bridgeDeliverGrace.
 //
 // Lifetime: the SessionEnd hook stops the bridge on a clean exit. `codex
 // queue` accepts a thread id whether or not a session is running it (the
@@ -28,6 +38,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -40,19 +51,58 @@ import (
 	"time"
 )
 
-// bridgeMaxDeliverFails is how many consecutive `codex queue` failures the
-// bridge tolerates before concluding the session (or the codex binary) is gone
-// and exiting. A success resets the counter.
-var bridgeMaxDeliverFails = 5
+// bridgeDeliverGrace is how long `codex queue` may keep failing before the
+// bridge concludes the session (or the codex binary) is gone and exits. This
+// is a time window rather than an attempt count because a failed delivery now
+// stalls the listen cursor and is retried on the next poll — counting attempts
+// would burn the whole budget within a second of one transient hiccup. A
+// success resets it.
+var bridgeDeliverGrace = 60 * time.Second
+
+// bridgeRetryInterval throttles those retries: the listen loop polls five
+// times a second and there is no point spawning `codex queue` that often.
+var bridgeRetryInterval = 1 * time.Second
+
+// codexQueueTimeout bounds a single `codex queue` invocation.
+var codexQueueTimeout = 10 * time.Second
+
+// codexNotifyMaxBytes is the per-message cap on the codex path. `codex queue`
+// takes the body as one argv element, so the real ceiling is the kernel's
+// per-argument limit (MAX_ARG_STRLEN — 128 KiB on Linux), not the few hundred
+// bytes Claude's Monitor cuts at; staying well under it leaves room for the
+// framing the bridge adds. Anything past it still arrives as a clipped notice
+// carrying a `full` command, exactly as on the Claude path.
+const codexNotifyMaxBytes = 96 * 1024
+
+// codexBridgeFarewell replaces the Monitor-worded farewell on this path. It
+// must reach the session: the bridge is a codex session'"'"'s only inbox, so an
+// unannounced exit is silent deafness.
+const codexBridgeFarewell = `[agent-chat] inbox bridge stopped — this codex session no longer receives peer messages automatically. Usually it was superseded by a newer bridge for the same nick (harmless: that one owns the inbox now) or the session is ending. If this session is still working, restart delivery with: agent-chat codex-bridge --thread <this session id> --as <nick>. Until then read the inbox by hand: agent-chat history --to me --tail 20 --format text`
+
+// codexListenOpts is the bridge'"'"'s framing of the shared listen loop.
+func codexListenOpts() listenOpts {
+	return listenOpts{
+		format:   func(line []byte, r Record) []byte { return notifyLineMax(line, r, codexNotifyMaxBytes) },
+		farewell: codexBridgeFarewell,
+	}
+}
 
 // Liveness probe of the codex thread writer lock (see the package comment).
 // The lock must be observed held at least once before its absence counts, so
 // a thread hosted elsewhere (remote app server) or a slow start never trips
 // it; after that, bridgeDeadProbes consecutive free/missing observations end
 // the bridge.
+//
+// The window is a minute rather than the fifteen seconds it started at.
+// Codex has been observed leaving the lock file present but unheld while its
+// session is still very much alive (seen on a resumed thread), which killed a
+// live session's bridge and left it silently deaf. Holding the lock is the
+// normal steady state, so those releases look transient — a minute of
+// *continuous* absence still reaps a genuinely orphaned bridge promptly while
+// no longer tripping over one.
 var (
 	bridgeProbeInterval = 5 * time.Second
-	bridgeDeadProbes    = 3
+	bridgeDeadProbes    = 12
 )
 
 func runCodexBridge(args []string) int {
@@ -136,20 +186,41 @@ func codexBridgeForeground(nick, thread string) int {
 	w := &bridgeWriter{
 		cancel: cancel,
 		deliver: func(msg string) error {
-			return codexQueue(ctx, thread, msg)
+			// Deliberately not the loop context: the farewell is delivered
+			// after cancel, and a takeover SIGTERM must not abort a delivery
+			// already in flight. Bounded by its own timeout instead.
+			dctx, dcancel := context.WithTimeout(context.Background(), codexQueueTimeout)
+			defer dcancel()
+			return codexQueue(dctx, thread, msg)
 		},
 	}
-	return listenLoop(ctx, nick, w)
+	return listenLoopOpts(ctx, nick, w, codexListenOpts())
 }
 
-// bridgeWriter adapts listenLoop's line stream into `codex queue` deliveries.
-// Internal notices (the "[agent-chat]" farewell/self-heal lines) are dropped —
-// they explain Monitor mechanics that do not exist on the codex side.
+// bridgeWriter adapts the listen loop's line stream into `codex queue`
+// deliveries. A delivery that fails is reported back to the caller rather than
+// swallowed, so drainListen holds the cursor and retries the message instead
+// of losing it.
 type bridgeWriter struct {
 	buf     []byte
 	deliver func(string) error
 	cancel  context.CancelFunc
-	fails   int
+
+	// now is the clock, injectable for tests; nil means time.Now.
+	now       func() time.Time
+	firstFail time.Time
+	lastTry   time.Time
+}
+
+// errBridgeBackoff stalls the cursor without spending an attempt, while we
+// wait out bridgeRetryInterval after a failure.
+var errBridgeBackoff = errors.New("codex-bridge: waiting to retry delivery")
+
+func (w *bridgeWriter) clock() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
 }
 
 func (w *bridgeWriter) Write(p []byte) (int, error) {
@@ -161,22 +232,51 @@ func (w *bridgeWriter) Write(p []byte) (int, error) {
 		}
 		line := strings.TrimSpace(string(w.buf[:nl]))
 		w.buf = w.buf[nl+1:]
-		if line == "" || strings.HasPrefix(line, "[agent-chat]") {
+		if line == "" {
 			continue
 		}
-		msg := "New agent-chat message:\n" + renderBridgeLine(line)
-		if err := w.deliver(msg); err != nil {
-			w.fails++
-			fmt.Fprintf(os.Stderr, "codex-bridge: deliver failed (%d/%d): %v\n", w.fails, bridgeMaxDeliverFails, err)
-			if w.fails >= bridgeMaxDeliverFails {
-				fmt.Fprintln(os.Stderr, "codex-bridge: codex queue keeps failing — session likely gone; exiting")
-				w.cancel()
-			}
-			continue
+		// Internal notices (the "[agent-chat]" farewell) are session-level
+		// news, not peer traffic: delivered verbatim, without the message
+		// framing, so a bridge going away says so in-session.
+		msg := line
+		if !strings.HasPrefix(line, "[agent-chat]") {
+			msg = "New agent-chat message:\n" + renderBridgeLine(line)
 		}
-		w.fails = 0
+		if err := w.attempt(msg); err != nil {
+			// Undelivered. Drop what we buffered: the stalled cursor means
+			// this line and anything after it are re-read next poll, so
+			// keeping them here would deliver them twice.
+			w.buf = w.buf[:0]
+			return len(p), err
+		}
 	}
 	return len(p), nil
+}
+
+// attempt delivers one message, rate-limiting retries after a failure and
+// ending the bridge once delivery has been broken for bridgeDeliverGrace.
+func (w *bridgeWriter) attempt(msg string) error {
+	now := w.clock()
+	if !w.firstFail.IsZero() && now.Sub(w.lastTry) < bridgeRetryInterval {
+		return errBridgeBackoff
+	}
+	w.lastTry = now
+	err := w.deliver(msg)
+	if err == nil {
+		w.firstFail = time.Time{}
+		return nil
+	}
+	if w.firstFail.IsZero() {
+		w.firstFail = now
+	}
+	broken := now.Sub(w.firstFail)
+	fmt.Fprintf(os.Stderr, "codex-bridge: deliver failed (retrying; broken for %s of %s): %v\n",
+		broken.Round(time.Second), bridgeDeliverGrace, err)
+	if broken >= bridgeDeliverGrace {
+		fmt.Fprintln(os.Stderr, "codex-bridge: codex queue has been failing too long — session likely gone; exiting")
+		w.cancel()
+	}
+	return err
 }
 
 // renderBridgeLine turns one raw listen line (JSON) into the text queued into

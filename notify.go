@@ -31,11 +31,20 @@ type notice struct {
 	Full    string  `json:"full"`
 }
 
-// notifyLine returns the bytes listen should emit for one log line: the line
-// itself when it fits, otherwise a notice shaped to stay under the cap so that
-// it cannot itself be clipped.
+// notifyLine returns the bytes listen should emit for one log line under the
+// Claude Monitor cap. Kept as the default so every existing caller keeps the
+// exact framing it had.
 func notifyLine(line []byte, r Record) []byte {
-	if len(line) <= listenNotifyMaxBytes {
+	return notifyLineMax(line, r, listenNotifyMaxBytes)
+}
+
+// notifyLineMax is notifyLine against an explicit transport cap: the line
+// itself when it fits, otherwise a notice shaped to stay under `max` so that
+// it cannot itself be clipped. The cap is per-transport — Claude's Monitor
+// cuts at a few hundred bytes, `codex queue` takes far more (see
+// codexNotifyMaxBytes).
+func notifyLineMax(line []byte, r Record, max int) []byte {
+	if len(line) <= max {
 		return line
 	}
 
@@ -58,7 +67,7 @@ func notifyLine(line []byte, r Record) []byte {
 	// real thing at every step rather than budget for a worst case.
 	for budget := noticePreviewRunes; budget >= 0; budget -= 20 {
 		n.Preview = previewOf(body, budget)
-		if out, ok := fitNotice(n); ok {
+		if out, ok := fitNotice(n, max); ok {
 			return out
 		}
 	}
@@ -67,23 +76,24 @@ func notifyLine(line []byte, r Record) []byte {
 	// refetches the record whole. Drop the path rather than shorten it — a half
 	// path invites a peer to read something that is not there.
 	n.Path = ""
-	if out, ok := fitNotice(n); ok {
+	if out, ok := fitNotice(n, max); ok {
 		return out
 	}
 	n.From, n.To = clampNick(n.From), clampNick(n.To)
-	if out, ok := fitNotice(n); ok {
+	if out, ok := fitNotice(n, max); ok {
 		return out
 	}
 	return line
 }
 
-// fitNotice encodes a notice and reports whether it survives delivery intact.
-func fitNotice(n notice) ([]byte, bool) {
+// fitNotice encodes a notice and reports whether it survives delivery intact
+// under the given transport cap.
+func fitNotice(n notice, max int) ([]byte, bool) {
 	out, err := json.Marshal(n)
 	if err != nil {
 		return nil, false
 	}
-	return out, len(out) <= listenNotifyMaxBytes
+	return out, len(out) <= max
 }
 
 // clampNick bounds a nick to the length the join path already enforces, for the

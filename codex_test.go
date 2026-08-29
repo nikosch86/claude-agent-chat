@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // --emit codex prints the SessionStart envelope Codex hooks consume (the same
@@ -141,9 +143,10 @@ func TestRenderBridgeLine(t *testing.T) {
 	}
 }
 
-// The writer buffers partial lines, skips internal "[agent-chat]" notices, and
-// prefixes each delivery.
-func TestBridgeWriterSplitsAndFilters(t *testing.T) {
+// The writer buffers partial lines, frames peer traffic, and — unlike before —
+// passes internal "[agent-chat]" notices through verbatim. Dropping them is
+// what made a dying bridge look identical to a quiet chat.
+func TestBridgeWriterFramesPeerLinesAndPassesNotices(t *testing.T) {
 	var got []string
 	w := &bridgeWriter{
 		deliver: func(msg string) error { got = append(got, msg); return nil },
@@ -151,25 +154,69 @@ func TestBridgeWriterSplitsAndFilters(t *testing.T) {
 	}
 	line := `{"ts":1.000,"from":"bob","to":"@alice","text":"hi"}`
 	w.Write([]byte(line[:10]))
-	w.Write([]byte(line[10:] + "\n[agent-chat] inbox listener stopped\n"))
-	if len(got) != 1 {
-		t.Fatalf("deliveries = %d, want 1 (internal notice must be filtered): %q", len(got), got)
+	w.Write([]byte(line[10:] + "\n[agent-chat] inbox bridge stopped\n"))
+	if len(got) != 2 {
+		t.Fatalf("deliveries = %d, want 2 (peer line + internal notice): %q", len(got), got)
 	}
 	if want := "New agent-chat message:\n@bob: hi"; got[0] != want {
 		t.Errorf("delivered %q, want %q", got[0], want)
 	}
+	if want := "[agent-chat] inbox bridge stopped"; got[1] != want {
+		t.Errorf("notice delivered %q, want %q (verbatim, no message framing)", got[1], want)
+	}
 }
 
-// After bridgeMaxDeliverFails consecutive failures the writer cancels the
-// bridge context (the session is gone); a success in between resets the count.
-func TestBridgeWriterGivesUpAfterConsecutiveFailures(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	fail := true
+// A failed delivery must be reported to the caller — that return value is what
+// makes drainListen hold the cursor instead of dropping the message.
+func TestBridgeWriterReportsFailureToCaller(t *testing.T) {
+	w := &bridgeWriter{
+		cancel:  func() {},
+		deliver: func(string) error { return context.DeadlineExceeded },
+	}
+	line := []byte(`{"ts":1.000,"from":"bob","to":"@alice","text":"x"}` + "\n")
+	if _, err := w.Write(line); err == nil {
+		t.Fatal("Write reported success for a failed delivery; the cursor would advance past a lost message")
+	}
+}
+
+// Retries are rate-limited: the listen loop polls five times a second and a
+// stalled cursor re-offers the same line every poll.
+func TestBridgeWriterThrottlesRetries(t *testing.T) {
+	now := time.Unix(0, 0)
 	calls := 0
 	w := &bridgeWriter{
+		cancel:  func() {},
+		now:     func() time.Time { return now },
+		deliver: func(string) error { calls++; return context.DeadlineExceeded },
+	}
+	line := []byte(`{"ts":1.000,"from":"bob","to":"@alice","text":"x"}` + "\n")
+
+	w.Write(line)
+	for i := 0; i < 5; i++ {
+		now = now.Add(bridgeRetryInterval / 10)
+		w.Write(line)
+	}
+	if calls != 1 {
+		t.Fatalf("deliver called %d times inside the backoff window, want 1", calls)
+	}
+	now = now.Add(bridgeRetryInterval)
+	w.Write(line)
+	if calls != 2 {
+		t.Fatalf("deliver called %d times, want 2 once the backoff elapsed", calls)
+	}
+}
+
+// The bridge gives up only after delivery has been broken for the whole grace
+// period — a window, not an attempt count, because a stalled cursor retries
+// the same message on every poll. A success clears the window.
+func TestBridgeWriterGivesUpAfterGracePeriod(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	now := time.Unix(0, 0)
+	fail := true
+	w := &bridgeWriter{
 		cancel: cancel,
+		now:    func() time.Time { return now },
 		deliver: func(string) error {
-			calls++
 			if fail {
 				return context.DeadlineExceeded
 			}
@@ -178,22 +225,56 @@ func TestBridgeWriterGivesUpAfterConsecutiveFailures(t *testing.T) {
 	}
 	line := []byte(`{"ts":1.000,"from":"bob","to":"@alice","text":"x"}` + "\n")
 
-	// One failure short of the limit, then a success: counter must reset.
-	for i := 0; i < bridgeMaxDeliverFails-1; i++ {
-		w.Write(line)
+	w.Write(line)
+	now = now.Add(bridgeDeliverGrace - time.Second)
+	w.Write(line)
+	if ctx.Err() != nil {
+		t.Fatal("cancelled before the grace period elapsed")
 	}
+
+	// A success resets the window.
 	fail = false
+	now = now.Add(bridgeRetryInterval)
 	w.Write(line)
 	fail = true
-	for i := 0; i < bridgeMaxDeliverFails-1; i++ {
-		w.Write(line)
-	}
+	now = now.Add(bridgeDeliverGrace)
+	w.Write(line)
 	if ctx.Err() != nil {
-		t.Fatal("cancelled too early: a success must reset the failure count")
+		t.Fatal("a success must reset the failure window")
 	}
+
+	// Let the fresh window run out.
+	now = now.Add(bridgeDeliverGrace)
 	w.Write(line)
 	if ctx.Err() == nil {
-		t.Fatalf("context not cancelled after %d consecutive failures (%d deliveries)", bridgeMaxDeliverFails, calls)
+		t.Fatal("not cancelled after delivery was broken for a full grace period")
+	}
+}
+
+// The codex path must not inherit Claude's Monitor cap: a body Monitor would
+// clip into a preview travels whole into `codex queue`.
+func TestCodexPathCarriesBodiesMonitorWouldClip(t *testing.T) {
+	r := Record{Ts: 1.0, From: "bob", To: "@alice", Text: strings.Repeat("x", 2000)}
+	line := encode(t, r)
+
+	if claude := notifyLine(line, r); !bytes.Contains(claude, []byte(`"clipped":true`)) {
+		t.Fatalf("expected the Claude cap to clip a 2000-byte body, got %d bytes", len(claude))
+	}
+	if codex := codexListenOpts().format(line, r); string(codex) != string(line) {
+		t.Errorf("codex path clipped a %d-byte body it can carry whole", len(line))
+	}
+}
+
+// It still clips past its own cap, so a body can never exceed what one argv
+// element can hold.
+func TestCodexPathStillClipsPastItsOwnCap(t *testing.T) {
+	r := Record{Ts: 1.0, From: "bob", To: "@alice", Text: strings.Repeat("x", codexNotifyMaxBytes+1)}
+	out := codexListenOpts().format(encode(t, r), r)
+	if !bytes.Contains(out, []byte(`"clipped":true`)) {
+		t.Errorf("oversized body not clipped on the codex path (%d bytes)", len(out))
+	}
+	if len(out) > codexNotifyMaxBytes {
+		t.Errorf("notice itself is %d bytes, over the %d cap", len(out), codexNotifyMaxBytes)
 	}
 }
 

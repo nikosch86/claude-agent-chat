@@ -548,3 +548,65 @@ func TestListenRejectsWhenNoNickResolvable(t *testing.T) {
 		t.Errorf("stderr = %q, want resolver error", stderr)
 	}
 }
+
+// failWriter reports an error on every write, standing in for a codex bridge
+// whose `codex queue` call is failing.
+type failWriter struct{ n int }
+
+func (f *failWriter) Write(p []byte) (int, error) {
+	f.n++
+	return len(p), io.ErrClosedPipe
+}
+
+// A delivery that fails must not advance the cursor past the record: the
+// message is retried on the next drain rather than silently lost. This is the
+// drop the codex bridge was hitting — the cursor used to be persisted right
+// after the write, whatever the write did.
+func TestDrainListenHoldsCursorOnDeliveryFailure(t *testing.T) {
+	home := withTempHome(t)
+	writeLog(t, home, lineBobAlice)
+
+	failing := &failWriter{}
+	cursor := drainListen(0, "@alice", "alice", failing, notifyLine)
+	if cursor != 0 {
+		t.Fatalf("cursor advanced to %d past an undelivered record, want 0", cursor)
+	}
+	if off, ok := readCursor("alice"); ok && off != 0 {
+		t.Fatalf("persisted cursor = %d, want it left behind the undelivered record", off)
+	}
+	if failing.n != 1 {
+		t.Fatalf("writer got %d writes, want 1", failing.n)
+	}
+
+	// Once delivery works, the same record is handed over and the cursor moves.
+	var buf syncBuf
+	got := drainListen(cursor, "@alice", "alice", &buf, notifyLine)
+	if got == 0 {
+		t.Fatal("cursor did not advance after a successful delivery")
+	}
+	if !strings.Contains(buf.String(), "hi alice") {
+		t.Errorf("record not redelivered after the failure: %q", buf.String())
+	}
+}
+
+// A failure partway through a drain keeps everything from that record onward,
+// and stops the drain rather than pushing later records past the stall.
+func TestDrainListenStopsAtFirstFailure(t *testing.T) {
+	home := withTempHome(t)
+	writeLog(t, home, lineBobAlice, lineBroadcast)
+
+	failing := &failWriter{}
+	if cursor := drainListen(0, "@alice", "alice", failing, notifyLine); cursor != 0 {
+		t.Fatalf("cursor = %d, want 0", cursor)
+	}
+	if failing.n != 1 {
+		t.Fatalf("writer got %d writes, want 1 (drain must stop at the first failure)", failing.n)
+	}
+
+	var buf syncBuf
+	drainListen(0, "@alice", "alice", &buf, notifyLine)
+	out := buf.String()
+	if !strings.Contains(out, "hi alice") || !strings.Contains(out, "hello room") {
+		t.Errorf("both records should survive the stall, got %q", out)
+	}
+}
