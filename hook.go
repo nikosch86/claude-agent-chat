@@ -128,8 +128,15 @@ func runHookStart(args []string) int {
 		// traffic via `codex queue`, then hand the primer to the SessionStart
 		// hook as additionalContext. Without a session id there is no thread
 		// to queue into; join anyway (send/history still work) and say so.
+		//
+		// Codex re-fires SessionStart for the same thread on resume and after
+		// every automatic compaction. A bridge already serving this thread is
+		// left alone: respawning evicted it, and the evicted one announced
+		// its exit into a session that its replacement was still serving.
 		if sessionID == "" {
 			fmt.Fprintln(os.Stderr, "hook-start: no session_id in hook payload — codex bridge not started; incoming messages reachable via history only")
+		} else if pid, ok := bridgeAlive(nick, sessionID); ok {
+			fmt.Fprintf(os.Stderr, "hook-start: codex bridge already serving this thread (pid %d); not respawned\n", pid)
 		} else if err := spawnCodexBridge(nick, sessionID); err != nil {
 			fmt.Fprintf(os.Stderr, "hook-start: codex bridge not started: %v\n", err)
 		}

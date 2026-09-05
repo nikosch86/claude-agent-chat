@@ -40,6 +40,16 @@ var listenerTakeoverGrace = 3 * time.Second
 // returning a no-op release and warning. Being unable to lock must never
 // silence the listener.
 func tryLockListener(nick string) func() {
+	return tryLockListenerFor(nick, "")
+}
+
+// tryLockListenerFor is tryLockListener on behalf of a codex-bridge serving
+// thread. The only difference is how the incumbent is asked to step down: a
+// bridge already serving the same thread is being *replaced*, not silenced —
+// delivery continues from the new process — so it gets the quiet SIGUSR1 and
+// queues no farewell into the session. Anything else (a listener, a bridge
+// for another thread) gets SIGTERM and says goodbye.
+func tryLockListenerFor(nick, thread string) func() {
 	p := listenerLockPath(nick)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "listen: warning: lock dir unavailable (%v); continuing without singleton guard\n", err)
@@ -70,7 +80,7 @@ func tryLockListener(nick string) func() {
 	}
 
 	// Ask the incumbent to step down, then poll for the lock until it releases.
-	requestIncumbentStepDown(readLockHolder(p))
+	requestIncumbentStepDownFor(readLockHolder(p), thread)
 	deadline := time.Now().Add(listenerTakeoverGrace)
 	for {
 		switch err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); {
@@ -95,46 +105,44 @@ func tryLockListener(nick string) func() {
 // longer looks like a listener is a no-op: the bounded acquire loop then
 // either wins (the holder is already gone) or fails open.
 func requestIncumbentStepDown(pid int) {
-	if pid <= 0 || pid == os.Getpid() || !isOwnAgentChatProc(pid, "listen", "codex-bridge") {
-		return
-	}
-	_ = syscall.Kill(pid, syscall.SIGTERM)
+	requestIncumbentStepDownFor(pid, "")
 }
 
-// isOwnAgentChatProc reports whether pid is one of our own agent-chat
-// processes running one of the given verbs, read from /proc/<pid>/cmdline
-// where available (Linux), else from `ps -o command=` (macOS and other
-// no-/proc unixes). Unreadable means false.
-func isOwnAgentChatProc(pid int, verbs ...string) bool {
+// requestIncumbentStepDownFor is requestIncumbentStepDown for a taker that is
+// a codex-bridge serving thread: an incumbent bridge for that same thread is
+// stopped quietly (SIGUSR1, no farewell) because it is merely being replaced.
+func requestIncumbentStepDownFor(pid int, thread string) {
+	if pid <= 0 || pid == os.Getpid() {
+		return
+	}
+	argv := procArgv(pid)
+	if !isAgentChatArgv(argv, []string{"listen", "codex-bridge"}) {
+		return
+	}
+	sig := syscall.SIGTERM
+	if thread != "" && bridgeArgvThread(argv) == thread {
+		sig = syscall.SIGUSR1
+	}
+	_ = syscall.Kill(pid, sig)
+}
+
+// procArgv returns pid's argv, read from /proc/<pid>/cmdline where available
+// (Linux), else from `ps -o command=` (macOS and other no-/proc unixes). nil
+// when unreadable — which includes every host process when called from inside
+// a PID namespace such as Codex's sandbox, where they simply do not exist.
+func procArgv(pid int) []string {
 	if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
 		// argv is NUL-separated.
-		return isAgentChatArgv(strings.Split(string(b), "\x00"), verbs)
+		return strings.Split(string(b), "\x00")
 	}
 	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		// ps exits non-zero when the pid no longer exists.
-		return false
+		return nil
 	}
 	// ps space-joins argv into one line, so fields of a spaced argument
 	// match as individual tokens here.
-	return isAgentChatArgv(strings.Fields(string(out)), verbs)
-}
-
-// isAgentChatArgv applies the process heuristic to an argv: some argument
-// names the binary and one of the bare verbs appears alongside it.
-func isAgentChatArgv(argv, verbs []string) bool {
-	var sawBinary, sawVerb bool
-	for _, a := range argv {
-		if strings.Contains(a, "agent-chat") {
-			sawBinary = true
-		}
-		for _, v := range verbs {
-			if a == v {
-				sawVerb = true
-			}
-		}
-	}
-	return sawBinary && sawVerb
+	return strings.Fields(string(out))
 }
 
 // recordLockHolder stamps this process's pid into the lock file so a later
@@ -151,16 +159,4 @@ func recordLockHolder(f *os.File) {
 		return
 	}
 	_ = f.Sync()
-}
-
-func readLockHolder(path string) int {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return 0
-	}
-	return pid
 }

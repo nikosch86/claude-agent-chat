@@ -8,3 +8,11 @@ package main
 func tryLockListener(string) func() {
 	return func() {}
 }
+
+// tryLockListenerFor: same no-op for the codex bridge.
+func tryLockListenerFor(string, string) func() {
+	return func() {}
+}
+
+// procArgv cannot read another process's argv here.
+func procArgv(int) []string { return nil }

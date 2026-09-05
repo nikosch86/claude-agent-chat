@@ -219,7 +219,7 @@ func TestWatchCodexThreadExitsWhenLockReleased(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		watchCodexThread(ctx, cancel, path, 10*time.Millisecond, 3, log)
+		watchCodexThread(ctx, cancel, nil, path, 10*time.Millisecond, 3, log)
 		close(done)
 	}()
 
@@ -262,7 +262,7 @@ func TestWatchCodexThreadExitsWhenLockDeleted(t *testing.T) {
 	release := holdFlock(t, path)
 	done := make(chan struct{})
 	go func() {
-		watchCodexThread(ctx, cancel, path, 10*time.Millisecond, 3, os.Stderr)
+		watchCodexThread(ctx, cancel, nil, path, 10*time.Millisecond, 3, os.Stderr)
 		close(done)
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -283,10 +283,11 @@ func TestCodexBridgeExitsWhenThreadDies(t *testing.T) {
 	lock := filepath.Join(codexHome, "thread-writer-locks", "thread-dead.lock")
 	release := holdFlock(t, lock)
 
+	capture := filepath.Join(t.TempDir(), "calls")
 	env := append(os.Environ(),
 		"AGENT_CHAT_HOME="+home,
 		"CODEX_HOME="+codexHome,
-		"AGENT_CHAT_CODEX_BIN="+fakeCodex(t, filepath.Join(t.TempDir(), "calls")),
+		"AGENT_CHAT_CODEX_BIN="+fakeCodex(t, capture),
 		"AGENT_CHAT_CODEX_PROBE_MS=20",
 	)
 	bridge := exec.Command(builtBinary, "codex-bridge", "--thread", "thread-dead", "--as", "carol")
@@ -311,5 +312,10 @@ func TestCodexBridgeExitsWhenThreadDies(t *testing.T) {
 	}
 	if !waitFor(t, 2*time.Second, func() bool { _, err := os.Stat(pidPath); return os.IsNotExist(err) }) {
 		t.Errorf("pidfile still present after the bridge exited on its own")
+	}
+	// Nobody is left to tell — and Codex would replay a queued farewell as
+	// the first turn if the thread were ever resumed.
+	if b, _ := os.ReadFile(capture); strings.Contains(string(b), "inbox bridge stopped") {
+		t.Errorf("farewell queued into a thread whose session is gone:\n%s", b)
 	}
 }

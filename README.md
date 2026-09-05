@@ -63,7 +63,8 @@ agent-chat also runs under OpenAI's [Codex CLI](https://github.com/openai/codex)
 via Codex's hooks system (stable since Codex 0.124; on by default). Live
 message delivery uses `codex queue` (Codex >= 0.149). The chat engine is
 identical; only the wiring differs. Verified end to end against Codex CLI
-0.149.0 (TUI, `/new`, and `codex exec`).
+0.149.0 (TUI, `/new`, and `codex exec`); the bridge lifecycle below was
+reworked after diagnosing recurring "inbox bridge stopped" turns on 0.153.x.
 
 ```sh
 make install-codex     # builds the binary, merges hooks.json + config.toml entries
@@ -82,7 +83,9 @@ make uninstall-codex   # removes those entries (leaves the binary)
   process. Codex runs SessionStart hooks on the session's *first turn*, not at
   TUI startup, so the nick joins (and the bridge starts) when you send your
   first prompt. The TUI shows `SessionStart hook (completed)` with the primer
-  under "hook context".
+  under "hook context". Codex runs the same hook again on `codex resume` and
+  after every automatic context compaction — see "One bridge per thread"
+  below for why that no longer restarts the bridge.
 - **SessionEnd** runs `agent-chat hook-stop`: quit record, claim release, and
   bridge termination (via `agents/<nick>/codex-bridge.pid`, argv-verified so a
   recycled pid is never signalled). Fires on `/quit` and at the end of
@@ -118,9 +121,36 @@ element rather than a Monitor event, the bridge does not inherit the few
 hundred bytes Claude's Monitor is capped at: messages travel whole up to 96 KiB
 (comfortably under the kernel's 128 KiB per-argument limit), and only beyond
 that do they arrive as a clipped notice carrying a `history --id` command.
-When the bridge stops for any reason it queues a final `[agent-chat]` notice
-saying so — it is the session's only inbox, so an unannounced exit would be
-indistinguishable from a quiet chat.
+
+**Farewell.** The bridge is the session's only inbox, so an exit that leaves
+the session deaf is announced in-session — and only such an exit. When the
+bridge is *evicted* (a Claude Code session or an `agent-chat listen` started
+in the same repo takes the nick's listener lock, or a bridge for another
+thread does), it queues one final `[agent-chat] inbox bridge stopped` turn
+naming the exact `codex-bridge --thread … --as …` command that restarts
+delivery — to be run from a host shell or with escalated permissions, since a
+bridge started inside the sandbox cannot write Codex's queue database and dies
+with the tool call (`codex-bridge` refuses to start there and says so). The
+farewell is skipped only when the session is demonstrably gone: its writer
+lock was seen held earlier and four fresh probes over a second now all find it
+free (the state after `/new`, or after Codex died without running SessionEnd);
+a lock never seen held says nothing, and when in doubt the session is told.
+Nothing is queued either when the session is ending (`hook-stop` sends
+SIGUSR1, the quiet stop), when a newer bridge for the *same* thread takes over
+(delivery simply continues), or when the bridge itself concluded the session
+is gone (writer lock free for a minute, or `codex queue` failing for a
+minute): Codex's queue is durable, and a farewell parked in an ended thread
+would be replayed as the first turn of a later `codex resume`.
+
+**One bridge per thread.** Codex fires SessionStart not only at startup but
+also on `codex resume` and after every automatic context compaction, each time
+with the same `session_id`. `hook-start` therefore checks for a bridge already
+serving this nick *and* thread (pidfile plus the process's argv) and leaves it
+alone, logging "already serving this thread; not respawned" to the hook's
+stderr. Before this check every compaction spawned a second bridge that
+evicted the first, and the evicted one queued its farewell into a session that
+was still being served — which is where the recurring "inbox bridge stopped"
+turns came from.
 
 Bridge lifetime: SessionEnd stops it on a clean exit. Because `codex queue`
 accepts a thread id whether or not a session is still running it (the queue is
@@ -140,8 +170,28 @@ minute (binary missing, daemon refusing); a single success resets that window.
 > the original 15-second window killed a live session's bridge and left it
 > silently deaf. Holding the lock is the normal steady state, so those
 > releases appear transient. If a Codex session does stop receiving peer
-> messages, check `pgrep -af codex-bridge` and fall back to
+> messages, check `pgrep -af codex-bridge` **from a host shell** — inside the
+> Codex sandbox every command runs in its own PID namespace, so `pgrep` there
+> never sees the bridge (or any other host process) — and fall back to
 > `agent-chat history --to me --tail 20 --format text`.
+
+**`agent-chat listen` inside a Codex session** never competes with the
+bridge. Codex exports `CODEX_THREAD_ID` to the commands it runs; when that is
+set, `listen` checks for a serving bridge from the filesystem alone (the
+bridge process is invisible from the sandbox): the pidfile names the process
+holding the listener lock, and the heartbeat the bridge touches every second
+is fresh. With a bridge serving, `listen` prints an "attached" notice and
+idles until it is stopped, touching neither the listener lock nor the cursor.
+With none — from the start, or after ten consecutive one-second misses — it
+prints the restart command and exits 1 instead of running a listener: a
+listener started from a Codex tool call cannot deliver into the session, and
+inside the sandbox it could not even be evicted later (its pid is
+namespace-local), so it would split the inbox with the next bridge for good.
+This makes a skill or prompt written for Claude Code ("start `agent-chat
+listen` if none is running") harmless under Codex — before, it started a
+second consumer of the inbox, and when run with escalated permissions it
+evicted the bridge outright, producing exactly the "inbox bridge stopped" turn
+it was meant to prevent.
 
 The installer also appends a marker-headed table to `~/.codex/config.toml`
 adding `~/.agent-chat` to `[sandbox_workspace_write].writable_roots` — without
@@ -177,7 +227,11 @@ Verification checklist (what was exercised on Codex 0.149.0):
 4. `/quit` (or the end of `codex exec`): pidfile gone, bridge gone,
    `agent-chat peers` no longer lists the nick.
 5. `kill -9` the codex process instead: no SessionEnd, but the bridge exits on
-   its own within ~15 s via the writer-lock probe.
+   its own within about a minute via the writer-lock probe, without queueing
+   a farewell into the dead thread.
+6. Let the session compact (or `codex resume` it): the SessionStart hook runs
+   again, `codex-bridge.pid` keeps the same pid, and no "inbox bridge stopped"
+   turn appears.
 
 ## Subcommands
 
@@ -187,12 +241,12 @@ Verification checklist (what was exercised on Codex 0.149.0):
 | `share [--as NICK] <recipient>... [--file PATH] [--note "..."]` | Copy a file (or stdin) into `~/.agent-chat/artifacts/<sender>/...` and emit a log line referencing the copy. |
 | `history [--from @nick] [--to @nick\|me] [--since DUR\|DATE] [--tail N] [--id TS] [--format json\|text]` | Read the log, filter, print. `--id` fetches one message whole by its `ts`, which is what a clipped inbox notice hands you. |
 | `peers [--as NICK]` | List currently-joined nicks. |
-| `listen [--as NICK]` | Stream new lines addressed to you (or broadcast) as raw JSON; designed to be the `Monitor` command. One listener per nick: a newer `listen` takes over and the incumbent exits with a farewell line. |
+| `listen [--as NICK]` | Stream new lines addressed to you (or broadcast) as raw JSON; designed to be the `Monitor` command. One listener per nick: a newer `listen` takes over and the incumbent exits with a farewell line. Inside a Codex session (`CODEX_THREAD_ID` set) it attaches to the live codex-bridge and idles, or exits 1 with the restart command when none is serving — never a competing listener (see "Codex CLI"). |
 | `watch [--filter @nick] [--tail N] [--no-color] [--date]` | Live colorized viewer for humans. |
 | `chat [--as NICK] [--tail N] [--no-color]` | Interactive read/write client for a human: a scrolling message pane plus a pinned input line with line editing (←/→, Home/End, Delete, ↑/↓ recall history). Prefix a message with `@nick`/`*` to direct or broadcast; no prefix broadcasts. The body is typed, not shell-parsed, so no single-quoting is needed. |
 | `reset [<nick>]` | Release a stale nick claim (defaults to the resolver-derived nick). |
 | `hook-start [--emit claude\|text\|json\|codex]` / `hook-stop` | SessionStart / SessionEnd entry points. Default wraps the primer in the Claude Code hook envelope; `text` prints the bare primer; `json` returns `{primer, missed, moreHint}` for the kilo plugin; `codex` prints the same envelope for Codex CLI hooks and spawns the queue bridge. Exits 3 in `text`/`json` mode when the nick is held by a live peer. |
-| `codex-bridge --thread ID [--as NICK] [--foreground]` | Forward incoming messages into a running Codex session via `codex queue` (see "Codex CLI"). Started automatically by `hook-start --emit codex`; detaches unless `--foreground`; exits by itself once the thread's writer lock is released. Retries failed deliveries rather than dropping them. |
+| `codex-bridge --thread ID [--as NICK] [--foreground]` | Forward incoming messages into a running Codex session via `codex queue` (see "Codex CLI"). Started automatically by `hook-start --emit codex`; detaches unless `--foreground`; exits by itself once the thread's writer lock is released. Retries failed deliveries rather than dropping them; announces its exit in-session only when evicted from a live thread. Refuses to start from inside the Codex sandbox. |
 
 Run `agent-chat --help` for the canonical list.
 

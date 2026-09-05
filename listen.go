@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -55,6 +57,17 @@ func runListen(args []string) int {
 		return 2
 	}
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// Inside a Codex session the detached codex-bridge already is this nick's
+	// inbox, and it delivers into the session — which a listener started from
+	// a tool call cannot. Attach to it instead of competing, and never run a
+	// listener from there (see listenInsideCodex).
+	if thread := codexThreadFromEnv(); thread != "" {
+		return listenInsideCodex(ctx, nick, thread, os.Stdout)
+	}
+
 	// Singleton via takeover. At most one live listener per nick may run — a
 	// second would duplicate notifications and race on the cursor. Rather than
 	// refuse to start when the lock is held (which made a fresh Monitor's
@@ -65,24 +78,120 @@ func runListen(args []string) int {
 	// runs and never goes silent. See tryLockListener for the mechanism.
 	defer tryLockListener(nick)()
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	return listenLoop(ctx, nick, os.Stdout)
 }
+
+// codexThreadFromEnv reports the Codex thread id when this process runs inside
+// a Codex session's tool call — Codex exports CODEX_THREAD_ID to the commands
+// it executes — and "" everywhere else.
+func codexThreadFromEnv() string {
+	return strings.TrimSpace(os.Getenv("CODEX_THREAD_ID"))
+}
+
+// bridgeStaleThreshold is how old the bridge's heartbeat may get before
+// bridgeServing treats the bridge as dead. The bridge touches it every second
+// from a dedicated goroutine, so anything past a few seconds means the
+// process is gone or wedged; the margin covers a suspend/resume or a busy
+// host without tripping.
+var bridgeStaleThreshold = 15 * time.Second
+
+// bridgeAttachMisses is how many consecutive one-second checks must find no
+// serving bridge before an attached listen concludes the bridge is gone —
+// long enough to ride out a same-thread handover, during which the pidfile
+// and the lock holder briefly disagree.
+var bridgeAttachMisses = 10
+
+// bridgeServing reports whether a codex-bridge is currently serving nick,
+// judged from the filesystem alone: its pidfile names the process that holds
+// the listener lock (a Claude listener taking the nick overwrites the lock
+// holder with its own pid, so a stale pidfile cannot pass), and the heartbeat
+// is fresh. A process check is useless where this matters — Codex's sandbox
+// runs each command in its own PID namespace, where the bridge and every
+// other host process are invisible, which is exactly what led agents to
+// conclude "no listener running" and start a competing one.
+func bridgeServing(nick string, now time.Time) bool {
+	pid := readPidFile(bridgePidPath(nick))
+	if pid <= 0 || readLockHolder(listenerLockPath(nick)) != pid {
+		return false
+	}
+	fi, err := os.Stat(heartbeatPath(nick))
+	if err != nil {
+		return false
+	}
+	return now.Sub(fi.ModTime()) < bridgeStaleThreshold
+}
+
+const listenAttachNotice = `[agent-chat] attached: this Codex session's inbox is its codex-bridge, which delivers peer messages automatically as "New agent-chat message" turns. No listener is needed, so this command stays attached and idle instead of competing with the bridge for the inbox. Read the inbox by hand with: agent-chat history --to me --tail 20 --format text`
+
+const listenNoBridgeNotice = `[agent-chat] no codex-bridge is serving this Codex session, and a listener started from inside it cannot deliver into the session (and could not be evicted later, splitting the inbox with the next bridge), so nothing was started. Restart the bridge from outside the sandbox — a host shell, or a command run with escalated permissions: agent-chat codex-bridge --thread %s --as %s. Until then read the inbox by hand: agent-chat history --to me --tail 20 --format text`
+
+// listenInsideCodex is `listen` run from a Codex session's tool call. With a
+// bridge serving nick it announces the attachment and idles until stopped,
+// touching neither the lock nor the cursor (exit 0). Without one — from the
+// start, or after bridgeAttachMisses consecutive misses — it prints the
+// restart command and exits 1 rather than running a listener: a listener here
+// cannot deliver into the session, and inside the sandbox it could not even be
+// evicted later (its pid is namespace-local), so it would split the inbox
+// with the next bridge for good.
+func listenInsideCodex(ctx context.Context, nick, thread string, out io.Writer) int {
+	if !bridgeServing(nick, time.Now()) {
+		fmt.Fprintf(out, listenNoBridgeNotice+"\n", thread, nick)
+		return 1
+	}
+	fmt.Fprintln(out, listenAttachNotice)
+	t := time.NewTicker(listenHeartbeatInterval)
+	defer t.Stop()
+	misses := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-t.C:
+			if bridgeServing(nick, time.Now()) {
+				misses = 0
+				continue
+			}
+			if misses++; misses >= bridgeAttachMisses {
+				fmt.Fprintf(out, "[agent-chat] the codex-bridge stopped. "+listenNoBridgeNotice[len("[agent-chat] "):]+"\n", thread, nick)
+				return 1
+			}
+		}
+	}
+}
+
+// readPidFile returns the pid stamped in a one-line file (a pidfile, or the
+// listener lock file), or 0 when the file is missing or malformed.
+func readPidFile(path string) int {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// readLockHolder is the pid the current listener lock holder stamped into
+// the lock file (see recordLockHolder), or 0.
+func readLockHolder(path string) int { return readPidFile(path) }
 
 // listenOpts carries the parts of the loop that differ per consumer: how a
 // matching log line is framed for delivery, and what is said on the way out.
 // Claude reads events through Monitor (small cap, Monitor-specific farewell);
 // the codex bridge queues them into a session (large cap, its own farewell).
 type listenOpts struct {
-	format   func([]byte, Record) []byte
-	farewell string
+	format func([]byte, Record) []byte
+	// farewell is consulted once, on exit; "" (or nil) leaves quietly. The
+	// codex bridge decides per exit whether the session must be told.
+	farewell func() string
 }
 
 // claudeListenOpts is the Monitor framing — the historical behaviour, and what
 // bare listenLoop still does.
 func claudeListenOpts() listenOpts {
-	return listenOpts{format: notifyLine, farewell: listenFarewell}
+	return listenOpts{format: notifyLine, farewell: func() string { return listenFarewell }}
 }
 
 func listenLoop(ctx context.Context, nick string, out io.Writer) int {
@@ -110,7 +219,11 @@ func listenLoopOpts(ctx context.Context, nick string, out io.Writer, opts listen
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(out, opts.farewell)
+			if opts.farewell != nil {
+				if msg := opts.farewell(); msg != "" {
+					fmt.Fprintln(out, msg)
+				}
+			}
 			return 0
 		case <-hbTicker.C:
 			touchListenerHeartbeat(nick)
@@ -268,4 +381,28 @@ func countUnreadFromOthers(nick string, cursor int64) int {
 		}
 	}
 	return n
+}
+
+// isOwnAgentChatProc reports whether pid is one of our own agent-chat
+// processes running one of the given verbs, judged from its argv (see
+// procArgv). Unreadable means false.
+func isOwnAgentChatProc(pid int, verbs ...string) bool {
+	return isAgentChatArgv(procArgv(pid), verbs)
+}
+
+// isAgentChatArgv applies the process heuristic to an argv: some argument
+// names the binary and one of the bare verbs appears alongside it.
+func isAgentChatArgv(argv, verbs []string) bool {
+	var sawBinary, sawVerb bool
+	for _, a := range argv {
+		if strings.Contains(a, "agent-chat") {
+			sawBinary = true
+		}
+		for _, v := range verbs {
+			if a == v {
+				sawVerb = true
+			}
+		}
+	}
+	return sawBinary && sawVerb
 }
